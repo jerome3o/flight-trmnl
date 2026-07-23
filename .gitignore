@@ -1,0 +1,8 @@
+# Local secrets / real observer location — never commit
+.env
+
+# Runtime artifacts
+latest.png
+*.png
+__pycache__/
+*.pyc

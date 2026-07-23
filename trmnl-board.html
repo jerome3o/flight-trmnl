@@ -1,0 +1,171 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Overhead — split-flap board (800×480)</title>
+<!--
+  Split-flap "departure board" screen for TRMNL BYOS rendering.
+
+  · Body is exactly 800×480 — point headless Chrome at it:
+      chromium --headless --window-size=800,480 --screenshot=shot.png board.html
+    then quantize with the 2-bit colormap (see notes). All colours below are
+    already restricted to the 4-level palette (#000/#555/#aaa/#fff), so the
+    quantize step changes nothing visually.
+  · Data: tries GET /api/visible (same-origin, i.e. when served by serve.py);
+    falls back to embedded SAMPLE data so the file previews standalone.
+  · Font: Oswald via Google Fonts for previewing. In the docker image, bundle
+    the font file and swap the <link> for a local @font-face — headless
+    Chrome without network will otherwise fall back to Arial Narrow.
+-->
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Oswald:wght@500;600&display=swap" rel="stylesheet">
+<style>
+  /* ---- the entire 2-bit e-ink palette ---- */
+  :root{
+    --k:#000000;   /* board black    */
+    --d:#555555;   /* dark grey — seams, dead flaps      */
+    --l:#aaaaaa;   /* light grey — furniture, labels     */
+    --w:#ffffff;   /* flap text                          */
+    --tile-w:20px; --tile-h:46px; --tile-gap:2px; --col-gap:11px;
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  html,body{width:800px;height:480px;overflow:hidden}
+  body{
+    background:var(--k);
+    font-family:'Oswald','Arial Narrow',Arial,sans-serif;
+    color:var(--w);
+    padding:10px 12px 8px;
+    display:flex;flex-direction:column;
+  }
+
+  /* ---- header ---- */
+  header{
+    display:flex;justify-content:space-between;align-items:baseline;
+    border-bottom:2px solid var(--l);
+    padding-bottom:6px;margin-bottom:6px;
+  }
+  .brand{font-size:22px;font-weight:600;letter-spacing:.12em;color:var(--w)}
+  .brand small{color:var(--l);font-weight:500;letter-spacing:.18em;font-size:12px;margin-left:10px}
+  .clock{font-size:22px;font-weight:600;letter-spacing:.08em;color:var(--w)}
+
+  /* ---- column labels ---- */
+  .cols{display:flex;gap:var(--col-gap);margin-bottom:4px}
+  .cols span{
+    font-size:11px;font-weight:500;letter-spacing:.22em;color:var(--l);
+    text-transform:uppercase;
+  }
+
+  /* ---- the board ---- */
+  #board{flex:1;display:flex;flex-direction:column;justify-content:space-between}
+  .row{display:flex;gap:var(--col-gap)}
+  .grp{display:flex;gap:var(--tile-gap)}
+  .tile{
+    width:var(--tile-w);height:var(--tile-h);
+    background:var(--k);
+    border:1px solid var(--d);
+    border-radius:3px;
+    position:relative;
+    display:flex;align-items:center;justify-content:center;
+    font-size:26px;font-weight:600;line-height:1;color:var(--w);
+    text-transform:uppercase;
+  }
+  /* the split-flap seam */
+  .tile::after{
+    content:"";position:absolute;left:0;right:0;top:50%;
+    height:1px;background:var(--d);
+  }
+  .tile.blank{color:var(--d)}          /* empty flap */
+  .tile.dim{color:var(--l)}            /* secondary info flaps */
+
+  /* ---- footer ---- */
+  footer{
+    border-top:1px solid var(--d);
+    margin-top:6px;padding-top:5px;
+    display:flex;justify-content:space-between;
+    font-size:11px;letter-spacing:.2em;color:var(--l);text-transform:uppercase;
+  }
+</style>
+</head>
+<body>
+  <header>
+    <div class="brand">OVERHEAD</div>
+    <div class="clock" id="clock">16:42</div>
+  </header>
+
+  <div class="cols" id="cols"></div>
+  <div id="board"></div>
+
+  <footer>
+    <span id="foot-l">WINDOW WATCH · 168° SSE · 5 KM</span>
+    <span id="foot-r">IN VIEW 0</span>
+  </footer>
+
+<script>
+/* Column layout: [label, width-in-tiles, dim?] */
+const COLS=[["AIRLINE",15,false],["FROM",4,false],["TYPE",4,true],
+            ["FLIGHT",7,true],["FL",3,false]];
+const ROWS=5;
+
+/* Fallback sample — same shape as /api/visible records */
+const SAMPLE=[
+ {airline:"BA CITYFLYER",origin:{iata:"AMS"},type:"E190",callsign:"CFE21B",
+  alt_ft:5200,bearing_deg:151,elevation_deg:18,in_view:true},
+ {airline:"BRITISH AIRWAYS",origin:{iata:"DXB"},type:"B789",callsign:"BAW106",
+  alt_ft:11000,bearing_deg:117,elevation_deg:12,in_view:true},
+ {airline:"EASYJET",origin:{iata:"CDG"},type:"A320",callsign:"EZY31KG",
+  alt_ft:8400,bearing_deg:204,elevation_deg:9,in_view:true},
+ {airline:"NPAS",origin:null,type:"EC45",callsign:"G-POLA",
+  alt_ft:1400,bearing_deg:169,elevation_deg:31,in_view:true},
+];
+
+const CARD=["N","NNE","NE","ENE","E","ESE","SE","SSE","S","SSW","SW","WSW","W","WNW","NW","NNW"];
+const cardinal=d=>CARD[Math.round(d/22.5)%16];
+
+function fit(text,n){
+  text=(text||"").toUpperCase().replace(/[^A-Z0-9 °\-]/g," ");
+  return (text.length>n?text.slice(0,n):text.padEnd(n," "));
+}
+
+function tiles(text,n,dim){
+  return [...fit(text,n)].map(ch=>
+    `<div class="tile ${ch===" "?"blank":dim?"dim":""}">${ch===" "?"·":ch}</div>`
+  ).join("");
+}
+
+function rowHtml(f){
+  const fl=f&&f.alt_ft!=null?String(Math.round(f.alt_ft/100)).padStart(3,"0"):"";
+  const cells = f ? [
+    fit(f.airline||f.type_desc||f.callsign,15),
+    fit(f.origin?(f.origin.iata||f.origin.icao||""):"",4),
+    fit(f.type||"",4),
+    fit(f.callsign||"",7),
+    fit(fl,3),
+  ] : COLS.map(c=>"".padEnd(c[1]," "));
+  return `<div class="row">`+cells.map((t,i)=>
+    `<div class="grp">${tiles(t,COLS[i][1],COLS[i][2])}</div>`).join("")+`</div>`;
+}
+
+function draw(planes){
+  const inView=planes.filter(p=>p.in_view!==false);
+  const rows=[];
+  for(let i=0;i<ROWS;i++) rows.push(rowHtml(inView[i]||null));
+  document.getElementById("board").innerHTML=rows.join("");
+  document.getElementById("cols").innerHTML=COLS.map(([label,n],i)=>{
+    const w=`calc(${n} * (var(--tile-w) + var(--tile-gap)) - var(--tile-gap))`;
+    return `<span style="width:${w}">${label}</span>`;
+  }).join("");
+  document.getElementById("foot-r").textContent=
+    `IN VIEW ${inView.length}${inView.length>ROWS?` · +${inView.length-ROWS} MORE`:""}`;
+  const now=new Date();
+  document.getElementById("clock").textContent=
+    String(now.getHours()).padStart(2,"0")+":"+String(now.getMinutes()).padStart(2,"0");
+}
+
+/* Live when served next to serve.py; sample when opened standalone */
+fetch("/api/visible",{cache:"no-store"})
+  .then(r=>{ if(!r.ok) throw 0; return r.json(); })
+  .then(draw)
+  .catch(()=>draw(SAMPLE));
+</script>
+</body>
+</html>

@@ -1,0 +1,513 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Window Approach — window flight spotter</title>
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Archivo:wdth,wght@75..125,400..800&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+  :root{
+    --bg:#10151b;
+    --panel:#161d25;
+    --panel-edge:#232d38;
+    --ink:#e9e7e0;
+    --mute:#8b96a3;
+    --amber:#ffb454;        /* in-view aircraft + cone */
+    --amber-dim:#9a6f38;
+    --sky:#7fc4d8;          /* out-of-view aircraft */
+    --danger:#e2694f;
+    --strip:#1b232d;
+    --mono:'IBM Plex Mono',ui-monospace,monospace;
+    --sans:'Archivo',system-ui,sans-serif;
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  html,body{height:100%}
+  body{
+    font-family:var(--sans);
+    background:var(--bg);color:var(--ink);
+    display:grid;grid-template-columns:340px 1fr;
+    height:100vh;overflow:hidden;
+  }
+
+  /* ---------- sidebar ---------- */
+  aside{
+    background:var(--panel);
+    border-right:1px solid var(--panel-edge);
+    display:flex;flex-direction:column;
+    min-height:0;
+  }
+  header{padding:18px 18px 14px;border-bottom:1px solid var(--panel-edge)}
+  .eyebrow{
+    font-family:var(--mono);font-size:10px;letter-spacing:.22em;
+    text-transform:uppercase;color:var(--amber);
+  }
+  h1{
+    font-size:24px;font-weight:750;letter-spacing:-.01em;
+    font-variation-settings:'wdth' 88;
+    margin-top:2px;
+  }
+  .sub{color:var(--mute);font-size:12.5px;margin-top:4px;line-height:1.45}
+
+  .controls{padding:14px 18px;border-bottom:1px solid var(--panel-edge)}
+  .ctl{margin-bottom:12px}
+  .ctl:last-child{margin-bottom:0}
+  .ctl label{
+    display:flex;justify-content:space-between;align-items:baseline;
+    font-size:12px;color:var(--mute);margin-bottom:5px;
+  }
+  .ctl label output{
+    font-family:var(--mono);font-size:12px;color:var(--ink);font-weight:500;
+  }
+  input[type=range]{
+    width:100%;height:22px;appearance:none;background:transparent;
+    outline:none;cursor:pointer;
+  }
+  input[type=range]::-webkit-slider-runnable-track{
+    height:3px;border-radius:2px;background:var(--panel-edge);
+  }
+  input[type=range]::-webkit-slider-thumb{
+    appearance:none;width:14px;height:14px;border-radius:50%;
+    background:var(--amber);border:2px solid var(--panel);
+    margin-top:-5.5px;
+  }
+  input[type=range]::-moz-range-track{
+    height:3px;border-radius:2px;background:var(--panel-edge);
+  }
+  input[type=range]::-moz-range-thumb{
+    width:12px;height:12px;border-radius:50%;
+    background:var(--amber);border:2px solid var(--panel);
+  }
+  input[type=range]:focus-visible{outline:2px solid var(--amber);outline-offset:4px}
+  .row{display:flex;gap:10px}
+  .row .ctl{flex:1}
+  select,button{
+    font-family:var(--mono);font-size:12px;
+    background:var(--strip);color:var(--ink);
+    border:1px solid var(--panel-edge);border-radius:6px;
+    padding:7px 9px;width:100%;cursor:pointer;
+  }
+  select:focus-visible,button:focus-visible{outline:2px solid var(--amber);outline-offset:2px}
+  button.primary{background:var(--amber);border-color:var(--amber);color:#181206;font-weight:600}
+  button.primary:hover{filter:brightness(1.06)}
+  .status{
+    padding:9px 18px;font-family:var(--mono);font-size:11px;color:var(--mute);
+    border-bottom:1px solid var(--panel-edge);
+    display:flex;justify-content:space-between;gap:8px;
+  }
+  .status .live{color:var(--amber)}
+  .status .err{color:var(--danger)}
+
+  /* ---------- flight strips ---------- */
+  .strips{flex:1;overflow-y:auto;padding:10px 12px 16px;min-height:0}
+  .strips h2{
+    font-family:var(--mono);font-size:10px;letter-spacing:.2em;
+    text-transform:uppercase;color:var(--mute);
+    padding:6px 6px 8px;
+  }
+  .strip{
+    background:var(--strip);
+    border:1px solid var(--panel-edge);
+    border-left:3px solid var(--amber);
+    border-radius:6px;padding:9px 11px;margin-bottom:8px;
+    cursor:pointer;transition:transform .12s ease,border-color .12s ease;
+  }
+  .strip:hover{transform:translateX(3px);border-color:var(--amber-dim)}
+  .strip .top{display:flex;justify-content:space-between;align-items:baseline;gap:8px}
+  .strip .airline{font-weight:650;font-size:14px;letter-spacing:.01em;min-width:0;
+    overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .strip .cs-sm{font-family:var(--mono);font-size:10.5px;color:var(--mute);
+    letter-spacing:.05em;flex-shrink:0}
+  .strip .origin{font-family:var(--mono);font-size:12px;color:var(--amber);margin-top:4px}
+  .strip .actype{font-size:11.5px;color:var(--mute);margin-top:2px}
+  .strip .data{
+    display:grid;grid-template-columns:repeat(4,1fr);gap:2px 8px;
+    margin-top:7px;font-family:var(--mono);font-size:11px;
+  }
+  .strip .data b{display:block;font-size:9px;font-weight:400;letter-spacing:.12em;color:var(--mute);text-transform:uppercase}
+  .empty{
+    color:var(--mute);font-size:13px;padding:18px 8px;line-height:1.5;
+  }
+  .empty strong{color:var(--ink);font-weight:600}
+
+  /* ---------- map ---------- */
+  #map{height:100%;width:100%;background:#0b0f13}
+  .leaflet-container{font-family:var(--sans)}
+  .plane-icon svg{display:block;filter:drop-shadow(0 1px 2px rgba(0,0,0,.6))}
+  .leaflet-popup-content-wrapper{
+    background:var(--panel);color:var(--ink);border-radius:8px;
+    border:1px solid var(--panel-edge);
+  }
+  .leaflet-popup-tip{background:var(--panel)}
+  .leaflet-popup-content{font-family:var(--mono);font-size:12px;line-height:1.6;margin:10px 14px}
+  .leaflet-popup-content .pc-cs{font-size:15px;font-weight:600;color:var(--amber)}
+
+  @media (max-width:760px){
+    body{grid-template-columns:1fr;grid-template-rows:1fr 46vh}
+    aside{order:2;border-right:none;border-top:1px solid var(--panel-edge)}
+    #map{order:1}
+  }
+  @media (prefers-reduced-motion:reduce){
+    .strip{transition:none}
+  }
+</style>
+</head>
+<body>
+
+<aside>
+  <header>
+    <div class="eyebrow">window watch</div>
+    <h1>Window Approach</h1>
+    <div class="sub">Live ADS-B traffic inside the sector you can see from the window. Drag the pin to move the observer; tune the cone below.</div>
+  </header>
+
+  <div class="controls">
+    <div class="ctl">
+      <label>Window bearing <output id="oBearing">168° SSE</output></label>
+      <input type="range" id="bearing" min="0" max="359" step="1" value="168">
+    </div>
+    <div class="ctl">
+      <label>Field of view <output id="oFov">145°</output></label>
+      <input type="range" id="fov" min="20" max="180" step="5" value="145">
+    </div>
+    <div class="row">
+      <div class="ctl">
+        <label>Range <output id="oRange">5 km</output></label>
+        <input type="range" id="range" min="5" max="100" step="5" value="5">
+      </div>
+      <div class="ctl">
+        <label>Min elevation <output id="oMinelev">8°</output></label>
+        <input type="range" id="minelev" min="0" max="30" step="1" value="8">
+      </div>
+    </div>
+    <div class="row">
+      <div class="ctl">
+        <label for="source">Data source</label>
+        <select id="source">
+          <option value="adsblol">adsb.lol</option>
+          <option value="airplaneslive">airplanes.live</option>
+          <option value="adsbfi">adsb.fi</option>
+        </select>
+      </div>
+      <div class="ctl">
+        <label for="refresh">Auto refresh</label>
+        <select id="refresh">
+          <option value="10">every 10 s</option>
+          <option value="20" selected>every 20 s</option>
+          <option value="60">every 60 s</option>
+          <option value="0">off</option>
+        </select>
+      </div>
+    </div>
+    <div class="ctl" style="margin-top:2px">
+      <button class="primary" id="fetchNow">Refresh now</button>
+    </div>
+  </div>
+
+  <div class="status">
+    <span id="statusLeft">Waiting for first fetch…</span>
+    <span id="statusRight"></span>
+  </div>
+
+  <div class="strips">
+    <h2>In your window</h2>
+    <div id="stripList"></div>
+  </div>
+</aside>
+
+<div id="map"></div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
+<script>
+/* ------------------------------------------------------------------ */
+/*  Placeholder starting position (central London) for this standalone  */
+/*  browser tool — drag the home marker to your own window. Not a real  */
+/*  location; the deployed board reads LAT/LON from the environment.    */
+/* ------------------------------------------------------------------ */
+const HOME = { lat: 51.5074, lon: -0.1278 };
+const EARTH_R = 6371008.8; // metres
+const SOURCES = {
+  adsblol:       (la,lo,nm)=>`https://api.adsb.lol/v2/point/${la}/${lo}/${nm}`,
+  airplaneslive: (la,lo,nm)=>`https://api.airplanes.live/v2/point/${la}/${lo}/${nm}`,
+  adsbfi:        (la,lo,nm)=>`https://opendata.adsb.fi/api/v2/lat/${la}/lon/${lo}/dist/${nm}`,
+};
+const CARD = ["N","NNE","NE","ENE","E","ESE","SE","SSE","S","SSW","SW","WSW","W","WNW","NW","NNW"];
+const cardinal = d => CARD[Math.round(d/22.5) % 16];
+const rad = d => d*Math.PI/180, deg = r => r*180/Math.PI;
+
+/* ---------------- geometry ---------------- */
+function haversineKm(a1,o1,a2,o2){
+  const p1=rad(a1),p2=rad(a2),dp=rad(a2-a1),dl=rad(o2-o1);
+  const h=Math.sin(dp/2)**2 + Math.cos(p1)*Math.cos(p2)*Math.sin(dl/2)**2;
+  return 2*(EARTH_R/1000)*Math.asin(Math.sqrt(h));
+}
+function bearingDeg(a1,o1,a2,o2){
+  const p1=rad(a1),p2=rad(a2),dl=rad(o2-o1);
+  const x=Math.sin(dl)*Math.cos(p2);
+  const y=Math.cos(p1)*Math.sin(p2)-Math.sin(p1)*Math.cos(p2)*Math.cos(dl);
+  return (deg(Math.atan2(x,y))+360)%360;
+}
+function destPoint(lat,lon,brgDeg,distKm){
+  const d=distKm*1000/EARTH_R, b=rad(brgDeg), p1=rad(lat), l1=rad(lon);
+  const p2=Math.asin(Math.sin(p1)*Math.cos(d)+Math.cos(p1)*Math.sin(d)*Math.cos(b));
+  const l2=l1+Math.atan2(Math.sin(b)*Math.sin(d)*Math.cos(p1),
+                         Math.cos(d)-Math.sin(p1)*Math.sin(p2));
+  return [deg(p2), deg(l2)];
+}
+const angDiff=(a,b)=>{const d=Math.abs(a-b)%360;return d>180?360-d:d;};
+function elevationDeg(distKm,altFt){
+  const altKm=altFt*0.0003048;
+  if(distKm<0.01) return 90;
+  const drop=distKm*distKm/(2*EARTH_R/1000);
+  return deg(Math.atan2(altKm-drop, distKm));
+}
+
+/* ---------------- state ---------------- */
+const S = {
+  lat:HOME.lat, lon:HOME.lon,
+  bearing:168, fov:145, rangeKm:5, minElev:8,
+  source:"adsblol", refresh:20,
+  timer:null, planes:new Map(),   // hex → {marker,data}
+};
+
+/* ---------------- map setup ---------------- */
+const map=L.map("map",{zoomControl:true}).setView([S.lat,S.lon],13);
+L.tileLayer("https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png",{
+  attribution:'&copy; <a href="https://www.openstreetmap.org/copyright">OSM</a> &copy; <a href="https://carto.com/">CARTO</a>',
+  maxZoom:19,
+}).addTo(map);
+
+const homeMarker=L.marker([S.lat,S.lon],{
+  draggable:true,
+  icon:L.divIcon({className:"",iconSize:[18,18],iconAnchor:[9,9],
+    html:`<div style="width:18px;height:18px;border-radius:50%;background:var(--amber);
+          border:3px solid #10151b;box-shadow:0 0 0 2px var(--amber)"></div>`}),
+}).addTo(map).bindPopup("Your window (drag me)");
+homeMarker.on("dragend",()=>{
+  const p=homeMarker.getLatLng();
+  S.lat=p.lat; S.lon=p.lng;
+  drawCone(); fetchTraffic();
+});
+
+let coneLayer=L.layerGroup().addTo(map);
+function drawCone(){
+  coneLayer.clearLayers();
+  const half=S.fov/2, lo=S.bearing-half, hi=S.bearing+half;
+  const step=Math.max(2,S.fov/40);
+  // sector polygon
+  const pts=[[S.lat,S.lon]];
+  for(let b=lo;b<=hi+0.001;b+=step) pts.push(destPoint(S.lat,S.lon,b,S.rangeKm));
+  L.polygon(pts,{color:"#ffb454",weight:1.5,opacity:.9,
+                 fillColor:"#ffb454",fillOpacity:.07}).addTo(coneLayer);
+  // edge rays slightly brighter
+  [lo,hi].forEach(b=>L.polyline([[S.lat,S.lon],destPoint(S.lat,S.lon,b,S.rangeKm)],
+    {color:"#ffb454",weight:1,opacity:.55,dashArray:"5 5"}).addTo(coneLayer));
+  // range rings inside the cone
+  for(let r=10;r<S.rangeKm;r+=10){
+    const arc=[];
+    for(let b=lo;b<=hi+0.001;b+=step) arc.push(destPoint(S.lat,S.lon,b,r));
+    L.polyline(arc,{color:"#ffb454",weight:.8,opacity:.35}).addTo(coneLayer);
+    L.marker(destPoint(S.lat,S.lon,S.bearing,r),{interactive:false,
+      icon:L.divIcon({className:"",iconSize:[40,12],iconAnchor:[20,6],
+        html:`<div style="font:10px var(--mono);color:#ffb454;opacity:.75;text-align:center">${r} km</div>`})
+    }).addTo(coneLayer);
+  }
+}
+
+/* ---------------- aircraft rendering ---------------- */
+function planeIcon(track,inView){
+  const col=inView?"#ffb454":"#7fc4d8", op=inView?1:.55, size=inView?26:18;
+  return L.divIcon({className:"plane-icon",iconSize:[size,size],iconAnchor:[size/2,size/2],
+    html:`<svg width="${size}" height="${size}" viewBox="0 0 24 24"
+           style="transform:rotate(${track??0}deg);opacity:${op}">
+           <path fill="${col}" d="M12 2 L14 9 L21 12 L14 13.6 L14 19 L16.4 21 L16.4 22
+             L12 20.8 L7.6 22 L7.6 21 L10 19 L10 13.6 L3 12 L10 9 Z"/></svg>`});
+}
+function popupHtml(f){
+  const alt=f.altFt!=null?f.altFt.toLocaleString()+" ft":"–";
+  const route=f.origin
+    ? `${f.origin.iata||f.origin.icao} → ${f.dest?(f.dest.iata||f.dest.icao):"?"}<br>`:"";
+  return `<div class="pc-cs">${f.flag?f.flag+"\u2009":""}${f.airline||f.callsign}</div>
+    ${f.callsign} · ${f.reg||f.hex}<br>
+    ${f.typeDesc?f.typeDesc+" · ":""}${f.type}<br>
+    ${route}${f.distKm.toFixed(1)} km ${Math.round(f.bearing)}° ${cardinal(f.bearing)}<br>
+    elev ${f.elev!=null?f.elev.toFixed(1)+"°":"–"} · ${alt}<br>
+    ${f.gs!=null?Math.round(f.gs)+" kt":"–"} · hdg ${f.track!=null?Math.round(f.track)+"°":"–"}`;
+}
+
+/* ---------------- fetch + classify ---------------- */
+// When the page is served by serve.py (http://localhost:8000), API calls go
+// through the same-origin /proxy endpoint, so CORS can never block them.
+// Opened as a bare file (file://), we fall back to hitting the APIs directly,
+// which only works if the API happens to send permissive CORS headers.
+const hasProxy = location.protocol.startsWith("http");
+
+async function getJson(url){
+  const r=await fetch(url,{cache:"no-store"});
+  if(!r.ok) throw new Error("HTTP "+r.status);
+  return r.json();
+}
+
+// Normalise both data shapes into one internal record.
+// Enriched, from our own /api/visible (airline, origin, registration...):
+const fromApi=r=>({hex:r.hex,callsign:r.callsign,airline:r.airline||null,
+  type:r.type||"?",typeDesc:r.type_desc||null,reg:r.registration||null,
+  flag:r.flag||null,country:r.country||null,
+  origin:r.origin||null,dest:r.destination||null,
+  lat:r.lat,lon:r.lon,altFt:r.alt_ft??null,gs:r.gs_kt??null,track:r.track_deg??null});
+// Degraded, straight from the upstream feed (file:// fallback, no route data):
+function fromRaw(a){
+  if(a.lat==null||a.lon==null) return null;
+  const alt=a.alt_geom??a.alt_baro;
+  if(alt==="ground") return null;
+  return {hex:a.hex,callsign:(a.flight||"").trim()||a.r||a.hex,
+    airline:a.ownOp||null,type:a.t||"?",typeDesc:a.desc||null,reg:a.r||null,
+    flag:null,country:null,
+    origin:null,dest:null,lat:a.lat,lon:a.lon,
+    altFt:typeof alt==="number"?alt:null,gs:a.gs??null,track:a.track??null};
+}
+
+async function fetchTraffic(){
+  const lat=S.lat.toFixed(6), lon=S.lon.toFixed(6),
+        nm=Math.min(Math.round(S.rangeKm/1.852),250);
+  const apiUrl=`/api/visible?all=1&lat=${lat}&lon=${lon}&bearing=${S.bearing}`+
+               `&fov=${S.fov}&range_km=${S.rangeKm}&min_elev=${S.minElev}&source=${S.source}`;
+  const directUrl=SOURCES[S.source](lat,lon,nm);
+  setStatus("Fetching…","");
+  let recs;
+  try{
+    recs = hasProxy ? (await getJson(apiUrl)).map(fromApi)
+                    : ((await getJson(directUrl)).ac||[]).map(fromRaw).filter(Boolean);
+  }catch(e1){
+    // second chance: raw upstream direct (works if their CORS allows it)
+    try{
+      recs = ((await getJson(directUrl)).ac||[]).map(fromRaw).filter(Boolean);
+    }catch(e2){
+      const hint = hasProxy
+        ? "Both the local API and direct fetch failed — is the internet up? Try another source."
+        : "Blocked by the browser (CORS). Run <b>python serve.py</b> in this folder and open <b>localhost:8000</b> instead.";
+      setStatus(`<span class="err">${hint}</span>`,"");
+      return;
+    }
+  }
+  render(recs);
+}
+
+function classify(f){
+  f.distKm=haversineKm(S.lat,S.lon,f.lat,f.lon);
+  f.bearing=bearingDeg(S.lat,S.lon,f.lat,f.lon);
+  f.elev=f.altFt!=null?elevationDeg(f.distKm,f.altFt):null;
+  f.inView=f.distKm<=S.rangeKm && angDiff(f.bearing,S.bearing)<=S.fov/2
+           && (f.elev==null||f.elev>=S.minElev);
+  return f;
+}
+
+function render(recs){
+  const seen=new Set(), inView=[];
+  for(const f of recs){
+    classify(f);
+    seen.add(f.hex);
+    let rec=S.planes.get(f.hex);
+    if(!rec){
+      rec={marker:L.marker([f.lat,f.lon]).addTo(map)};
+      S.planes.set(f.hex,rec);
+    }
+    rec.data=f;
+    rec.marker.setLatLng([f.lat,f.lon])
+              .setIcon(planeIcon(f.track,f.inView))
+              .bindPopup(popupHtml(f));
+    if(f.inView) inView.push(f);
+  }
+  // drop stale aircraft
+  for(const [hex,rec] of S.planes){
+    if(!seen.has(hex)){ map.removeLayer(rec.marker); S.planes.delete(hex); }
+  }
+  inView.sort((x,y)=>x.distKm-y.distKm);
+  renderStrips(inView);
+  const t=new Date().toLocaleTimeString([], {hour12:false});
+  setStatus(`<span class="live">●</span> ${t} · ${S.source}`,
+            `${inView.length} in view / ${seen.size} tracked`);
+}
+
+function renderStrips(list){
+  const el=document.getElementById("stripList");
+  if(!list.length){
+    el.innerHTML=`<div class="empty"><strong>Sky's clear in your sector.</strong><br>
+      Widen the cone or extend the range — or wait for the next arrival into City or Heathrow.</div>`;
+    return;
+  }
+  el.innerHTML=list.map(f=>{
+    const alt=f.altFt!=null?(f.altFt/1000).toFixed(1)+"k ft":"–";
+    const title=(f.flag?f.flag+"\u2009":"")+(f.airline||f.typeDesc||f.callsign);
+    const org=f.origin
+      ? `${f.origin.iata||f.origin.icao||"?"} · ${f.origin.city||f.origin.name||"?"}`
+      : "Origin unknown";
+    const typ=f.typeDesc?`${f.typeDesc} (${f.type})`:f.type;
+    return `<div class="strip" data-hex="${f.hex}" tabindex="0" role="button"
+        aria-label="Focus ${f.callsign} on map">
+      <div class="top"><span class="airline">${title}</span><span class="cs-sm">${f.callsign}</span></div>
+      <div class="origin">${org}</div>
+      <div class="actype">${typ}</div>
+      <div class="data">
+        <span><b>Dist</b>${f.distKm.toFixed(1)} km</span>
+        <span><b>Look</b>${Math.round(f.bearing)}° ${cardinal(f.bearing)}</span>
+        <span><b>Up</b>${f.elev!=null?f.elev.toFixed(0)+"°":"–"}</span>
+        <span><b>Alt</b>${alt}</span>
+      </div></div>`;
+  }).join("");
+  el.querySelectorAll(".strip").forEach(s=>{
+    const go=()=>{
+      const rec=S.planes.get(s.dataset.hex);
+      if(rec){ map.panTo(rec.marker.getLatLng()); rec.marker.openPopup(); }
+    };
+    s.addEventListener("click",go);
+    s.addEventListener("keydown",e=>{ if(e.key==="Enter"||e.key===" "){e.preventDefault();go();} });
+  });
+}
+
+function setStatus(l,r){
+  document.getElementById("statusLeft").innerHTML=l;
+  document.getElementById("statusRight").innerHTML=r;
+}
+
+/* ---------------- controls ---------------- */
+function bind(id,fmt,apply){
+  const el=document.getElementById(id), out=document.getElementById("o"+id[0].toUpperCase()+id.slice(1));
+  const upd=()=>{ apply(+el.value); if(out) out.textContent=fmt(+el.value); drawCone(); reclassify(); };
+  el.addEventListener("input",upd);
+}
+bind("bearing",v=>`${v}° ${cardinal(v)}`,v=>S.bearing=v);
+bind("fov",v=>`${v}°`,v=>S.fov=v);
+bind("range",v=>`${v} km`,v=>S.rangeKm=v);
+bind("minelev",v=>`${v}°`,v=>S.minElev=v);
+
+// re-classify existing planes instantly without refetching
+function reclassify(){
+  const inView=[];
+  for(const [,rec] of S.planes){
+    const f=rec.data; if(!f) continue;
+    classify(f);
+    rec.marker.setIcon(planeIcon(f.track,f.inView)).bindPopup(popupHtml(f));
+    if(f.inView) inView.push(f);
+  }
+  inView.sort((a,b)=>a.distKm-b.distKm);
+  renderStrips(inView);
+}
+
+document.getElementById("source").addEventListener("change",e=>{S.source=e.target.value;fetchTraffic();});
+document.getElementById("refresh").addEventListener("change",e=>{S.refresh=+e.target.value;schedule();});
+document.getElementById("fetchNow").addEventListener("click",fetchTraffic);
+
+function schedule(){
+  if(S.timer) clearInterval(S.timer);
+  if(S.refresh>0) S.timer=setInterval(fetchTraffic,S.refresh*1000);
+}
+
+/* ---------------- go ---------------- */
+drawCone();
+fetchTraffic();
+schedule();
+</script>
+</body>
+</html>
