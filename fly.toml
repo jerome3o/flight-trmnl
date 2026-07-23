@@ -21,6 +21,8 @@ primary_region = "lhr"   # London; pick your nearest https://fly.io/docs/referen
   RENDER_HEIGHT = "1404"
   RENDER_DEPTH = "4bit"
   REFRESH_RATE = "60"
+  # Chromium renders new Date() in this zone (London, BST/GMT).
+  TZ = "Europe/London"
 
 [http_service]
   internal_port = 8000

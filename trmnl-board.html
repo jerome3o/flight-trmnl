@@ -21,12 +21,12 @@
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Oswald:wght@500;600&display=swap" rel="stylesheet">
 <style>
-  /* ---- the entire 2-bit e-ink palette ---- */
+  /* ---- the entire 2-bit e-ink palette (light / paper theme) ---- */
   :root{
-    --k:#000000;   /* board black    */
-    --d:#555555;   /* dark grey — seams, dead flaps      */
-    --l:#aaaaaa;   /* light grey — furniture, labels     */
-    --w:#ffffff;   /* flap text                          */
+    --k:#ffffff;   /* board / page — paper white          */
+    --d:#aaaaaa;   /* light grey — seams, dead flaps, tile edges */
+    --l:#555555;   /* dark grey — furniture, labels        */
+    --w:#000000;   /* flap text — ink black                */
     /* All sizes below are set by layout() from the viewport; these are
        just fallbacks that reproduce the original 800×480 board. */
     --tile-w:20px; --tile-h:46px; --tile-gap:2px; --col-gap:11px;

@@ -556,7 +556,11 @@ def byos_display(base_url):
         "update_firmware": False,
         "firmware_url": None,
         "reset_firmware": False,
-        "special_function": "sleep",
+        # MUST be "none": the firmware persists this value and only runs the
+        # image download/display path while it is SF_NONE. Sending "sleep"
+        # here parks the device in the sleep special-function branch, so it
+        # stops refreshing the board (shows "Full view not available").
+        "special_function": "none",
     }
 
 
