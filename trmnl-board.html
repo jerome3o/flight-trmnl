@@ -2,36 +2,43 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<title>Overhead — split-flap board</title>
+<title>Overhead — map + split-flap board</title>
 <!--
-  Split-flap "departure board" screen for TRMNL BYOS rendering.
+  Two-panel "window watch" screen for TRMNL BYOS rendering.
+
+  · LEFT  (~45%): a top-down radar-style vector map centred on home — view
+    cone, range rings, north, home marker and each aircraft plotted at its
+    (bearing, distance) with a heading arrow + callsign/ETA label.
+  · RIGHT (~55%): the split-flap departure board, now with an ETA column.
 
   · Resolution-independent: the layout fills the viewport, so the same file
     renders correctly at 800×480 (TRMNL OG) or 1872×1404 (TRMNL X). Point
     headless Chrome at it with a window matching the panel:
       chromium --headless --window-size=1872,1404 --screenshot=shot.png board.html
-    then quantize (see render_loop.py). Tile size and the number of visible
-    rows are computed from the viewport by layout() below.
-  · Data: tries GET /api/visible (same-origin, i.e. when served by serve.py);
+    then quantize (see render_loop.py). Tile size, visible rows and the map
+    geometry are all computed from the viewport by layout()/buildMap() below.
+  · Data: tries GET /api/board (same-origin, i.e. when served by serve.py);
     falls back to embedded SAMPLE data so the file previews standalone.
   · Font: Oswald via Google Fonts for previewing. In the docker image, bundle
     the font file and swap the <link> for a local @font-face — headless
     Chrome without network will otherwise fall back to Arial Narrow.
+  · Palette: pure greyscale only — the panel is quantized to 4-bit grey, so
+    any hue is wasted. Light / paper theme (white page, black ink).
 -->
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Oswald:wght@500;600&display=swap" rel="stylesheet">
 <style>
-  /* ---- the entire 2-bit e-ink palette (light / paper theme) ---- */
+  /* ---- the entire e-ink palette (light / paper theme) ---- */
   :root{
     --k:#ffffff;   /* board / page — paper white          */
-    --d:#aaaaaa;   /* light grey — seams, dead flaps, tile edges */
+    --d:#aaaaaa;   /* light grey — seams, dead flaps, cone, upcoming marks */
     --l:#555555;   /* dark grey — furniture, labels        */
-    --w:#000000;   /* flap text — ink black                */
+    --w:#000000;   /* flap text / in-view marks — ink black */
     /* All sizes below are set by layout() from the viewport; these are
-       just fallbacks that reproduce the original 800×480 board. */
-    --tile-w:20px; --tile-h:46px; --tile-gap:2px; --col-gap:11px;
-    --pad-x:12px; --pad-y:9px; --brand-fs:22px; --label-fs:11px;
-    --tile-fs:26px; --seam-h:1px;
+       just fallbacks that reproduce a sensible 800×480 board. */
+    --tile-w:11px; --tile-h:25px; --tile-gap:1px; --col-gap:6px;
+    --pad-x:12px; --pad-y:9px; --brand-fs:22px; --label-fs:10px;
+    --tile-fs:15px; --seam-h:1px;
   }
   *{box-sizing:border-box;margin:0;padding:0}
   html,body{width:100vw;height:100vh;overflow:hidden}
@@ -39,8 +46,23 @@
     background:var(--k);
     font-family:'Oswald','Arial Narrow',Arial,sans-serif;
     color:var(--w);
+    display:flex;flex-direction:row;
+  }
+
+  /* ---- LEFT: the map panel ---- */
+  .left{
+    width:45%;height:100%;
+    padding:var(--pad-y) calc(var(--pad-x)*.6) var(--pad-y) var(--pad-x);
+    display:flex;flex-direction:column;
+  }
+  #svg{flex:1;width:100%;height:100%;display:block}
+
+  /* ---- RIGHT: the split-flap panel ---- */
+  .right{
+    width:55%;height:100%;
     padding:var(--pad-y) var(--pad-x);
     display:flex;flex-direction:column;
+    border-left:calc(var(--seam-h)*2) solid var(--l);
   }
 
   /* ---- header ---- */
@@ -56,7 +78,7 @@
   /* ---- column labels ---- */
   .cols{display:flex;gap:var(--col-gap);margin-bottom:calc(var(--pad-y)*.5)}
   .cols span{
-    font-size:var(--label-fs);font-weight:500;letter-spacing:.22em;color:var(--l);
+    font-size:var(--label-fs);font-weight:500;letter-spacing:.18em;color:var(--l);
     text-transform:uppercase;
   }
 
@@ -92,41 +114,43 @@
 </style>
 </head>
 <body>
-  <header>
-    <div class="brand">OVERHEAD</div>
-    <div class="clock" id="clock">16:42</div>
-  </header>
-
-  <div class="cols" id="cols"></div>
-  <div id="board"></div>
-
-  <footer>
-    <span id="foot-l">WINDOW WATCH · 168° SSE · 5 KM</span>
-    <span id="foot-r">IN VIEW 0</span>
-  </footer>
+  <div class="left"><svg id="svg" preserveAspectRatio="xMidYMid meet"></svg></div>
+  <div class="right">
+    <header>
+      <div class="brand">OVERHEAD</div>
+      <div class="clock" id="clock">16:42</div>
+    </header>
+    <div class="cols" id="cols"></div>
+    <div id="board"></div>
+    <footer>
+      <span id="foot-l">WINDOW WATCH · 168° SSE · 5 KM</span>
+      <span id="foot-r">IN VIEW 0</span>
+    </footer>
+  </div>
 
 <script>
-/* Column layout: [label, width-in-tiles, dim?] */
-const COLS=[["AIRLINE",15,false],["FROM",4,false],["TYPE",4,true],
-            ["FLIGHT",7,true],["FL",3,false]];
+/* Column layout for the split-flap list: [label, width-in-tiles, dim?] */
+const COLS=[["AIRLINE",12,false],["FROM",4,false],["TYPE",4,true],
+            ["FLIGHT",7,true],["FL",3,false],["ETA",4,false]];
 let ROWS=5;   /* recomputed from the viewport by layout() */
 
-/* Size the board to whatever panel we're rendered at (OG 800×480 or X
-   1872×1404): derive tile size from the width so all 33 columns fit, then
-   fill the available height with as many split-flap rows as it takes. */
+/* Size the split-flap board to fit the RIGHT panel (55% of the viewport):
+   derive tile size from that width so all columns fit, then fill the panel
+   height with as many split-flap rows as it takes. */
 function layout(){
   const set=document.documentElement.style;
   const W=window.innerWidth, H=window.innerHeight;
-  const nCols   = COLS.reduce((a,c)=>a+c[1],0);       // 33 tiles across
-  const nGroups = COLS.length;                          // 5 column groups
-  const nTileGap= COLS.reduce((a,c)=>a+c[1]-1,0);      // gaps within groups
-  const padX = Math.round(W*0.015);
+  const rightW = W*0.55;                                 // right panel width
+  const nCols   = COLS.reduce((a,c)=>a+c[1],0);          // tiles across
+  const nGroups = COLS.length;                            // column groups
+  const nTileGap= COLS.reduce((a,c)=>a+c[1]-1,0);        // gaps within groups
+  const padX = Math.round(rightW*0.03);
   // width budget: tileW*nCols + (0.1*tileW)*nTileGap + (0.55*tileW)*(nGroups-1)
   const denom = nCols + 0.1*nTileGap + 0.55*(nGroups-1);
-  const tileW = (W - 2*padX) / denom;
+  const tileW = (rightW - 2*padX) / denom;
   const tileH = tileW*2.3;
-  const padY  = Math.round(H*0.02);
-  const labelFs = Math.max(9, Math.round(tileW*0.55));
+  const padY  = Math.round(H*0.025);
+  const labelFs = Math.max(8, Math.round(tileW*0.62));
   set.setProperty("--pad-x", padX+"px");
   set.setProperty("--pad-y", padY+"px");
   set.setProperty("--tile-w", tileW.toFixed(2)+"px");
@@ -143,23 +167,44 @@ function layout(){
   ROWS = Math.max(1, Math.min(24, Math.floor((H - chrome) / rowStride)));
 }
 
-/* Fallback sample — same shape as /api/visible records */
-const SAMPLE=[
- {airline:"BA CITYFLYER",origin:{iata:"AMS"},type:"E190",callsign:"CFE21B",
-  alt_ft:5200,bearing_deg:151,elevation_deg:18,in_view:true},
- {airline:"BRITISH AIRWAYS",origin:{iata:"DXB"},type:"B789",callsign:"BAW106",
-  alt_ft:11000,bearing_deg:117,elevation_deg:12,in_view:true},
- {airline:"EASYJET",origin:{iata:"CDG"},type:"A320",callsign:"EZY31KG",
-  alt_ft:8400,bearing_deg:204,elevation_deg:9,in_view:true},
- {airline:"NPAS",origin:null,type:"EC45",callsign:"G-POLA",
-  alt_ft:1400,bearing_deg:169,elevation_deg:31,in_view:true},
-];
+/* Fallback sample — same shape as /api/board (config + flights[]) */
+const SAMPLE={
+  config:{bearing:168.0, fov:145.0, range_km:5.0, predict_range_km:180.0, horizon_min:10.0},
+  flights:[
+    {callsign:"BAW23", airline:"BRITISH AIRWAYS", type:"A21N", type_desc:"Airbus A321neo",
+     in_view:true, eta_min:0, bearing_deg:129.0, dist_km:3.4, track_deg:268,
+     alt_ft:5900, gs_kt:240, origin:{iata:"AMS"}, destination:{iata:"LHR"}},
+    {callsign:"CFE21B", airline:"BA CITYFLYER", type:"E190", type_desc:"Embraer 190",
+     in_view:true, eta_min:0, bearing_deg:185.0, dist_km:4.1, track_deg:310,
+     alt_ft:5200, gs_kt:210, origin:{iata:"DUB"}, destination:{iata:"LCY"}},
+    {callsign:"EZY31KG", airline:"EASYJET", type:"A320", type_desc:"Airbus A320",
+     in_view:false, eta_min:2.0, bearing_deg:214, dist_km:16.4, track_deg:40,
+     alt_ft:8400, gs_kt:300, origin:{iata:"CDG"}, destination:null},
+    {callsign:"VIR5F", airline:"VIRGIN ATLANTIC", type:"A35K", type_desc:"Airbus A350-1000",
+     in_view:false, eta_min:3.0, bearing_deg:132, dist_km:28.0, track_deg:300,
+     alt_ft:12000, gs_kt:360, origin:{iata:"JFK"}, destination:{iata:"LHR"}},
+    {callsign:"KLM43W", airline:"KLM", type:"B738", type_desc:"Boeing 737-800",
+     in_view:false, eta_min:5.0, bearing_deg:258, dist_km:47.5, track_deg:95,
+     alt_ft:16000, gs_kt:390, origin:{iata:"AMS"}, destination:{iata:"LHR"}},
+    {callsign:"RYR8ML", airline:"RYANAIR", type:"B38M", type_desc:"Boeing 737 MAX 8",
+     in_view:false, eta_min:6.0, bearing_deg:296, dist_km:63.2, track_deg:118,
+     alt_ft:19000, gs_kt:420, origin:{iata:"DUB"}, destination:null},
+    {callsign:"AFR27TG", airline:"AIR FRANCE", type:"A319", type_desc:"Airbus A319",
+     in_view:false, eta_min:8.0, bearing_deg:168, dist_km:92.0, track_deg:348,
+     alt_ft:24000, gs_kt:440, origin:{iata:"CDG"}, destination:{iata:"LHR"}},
+    {callsign:"DLH4XA", airline:"LUFTHANSA", type:"A21N", type_desc:"Airbus A321neo",
+     in_view:false, eta_min:10.0, bearing_deg:240, dist_km:124.0, track_deg:70,
+     alt_ft:31000, gs_kt:460, origin:{iata:"FRA"}, destination:{iata:"LHR"}},
+  ]
+};
 
 const CARD=["N","NNE","NE","ENE","E","ESE","SE","SSE","S","SSW","SW","WSW","W","WNW","NW","NNW"];
 const cardinal=d=>CARD[Math.round(d/22.5)%16];
+const iata=p=>p?(p.iata||p.icao||""):"";
+const etaText=f=> (f.in_view || !f.eta_min || f.eta_min<=0) ? "NOW" : ("~"+Math.round(f.eta_min)+"M");
 
 function fit(text,n){
-  text=(text||"").toUpperCase().replace(/[^A-Z0-9 °\-]/g," ");
+  text=(text||"").toUpperCase().replace(/[^A-Z0-9 °\-~]/g," ");
   return (text.length>n?text.slice(0,n):text.padEnd(n," "));
 }
 
@@ -172,39 +217,179 @@ function tiles(text,n,dim){
 function rowHtml(f){
   const fl=f&&f.alt_ft!=null?String(Math.round(f.alt_ft/100)).padStart(3,"0"):"";
   const cells = f ? [
-    fit(f.airline||f.type_desc||f.callsign,15),
-    fit(f.origin?(f.origin.iata||f.origin.icao||""):"",4),
+    fit(f.airline||f.type_desc||f.callsign,12),
+    fit(iata(f.origin),4),
     fit(f.type||"",4),
     fit(f.callsign||"",7),
     fit(fl,3),
+    fit(etaText(f),4),
   ] : COLS.map(c=>"".padEnd(c[1]," "));
   return `<div class="row">`+cells.map((t,i)=>
     `<div class="grp">${tiles(t,COLS[i][1],COLS[i][2])}</div>`).join("")+`</div>`;
 }
 
-function draw(planes){
-  const inView=planes.filter(p=>p.in_view!==false);
+/* ---------------- LEFT PANEL: the vector map ---------------- */
+
+const D2R=Math.PI/180;
+// polar → screen: north up. x = cx + r*sin(B), y = cy - r*cos(B)
+function polar(cx,cy,bearing,r){
+  return [cx + r*Math.sin(bearing*D2R), cy - r*Math.cos(bearing*D2R)];
+}
+function niceStep(x){
+  // round a target ring spacing to a friendly km value
+  const steps=[1,2,5,10,20,25,50,100,150,200];
+  for(const s of steps){ if(s>=x) return s; }
+  return steps[steps.length-1];
+}
+function esc(s){return String(s).replace(/&/g,"&amp;").replace(/</g,"&lt;");}
+
+function buildMap(cfg, flights){
+  const svg=document.getElementById("svg");
+  const box=svg.getBoundingClientRect();
+  const W=Math.max(50,box.width), H=Math.max(50,box.height);
+  svg.setAttribute("viewBox",`0 0 ${W} ${H}`);
+  const cx=W/2, cy=H/2;
+  const maxR=Math.min(W,H)/2 * 0.82;      // leave room for edge labels
+  const fs=Math.max(9, Math.min(W,H)*0.028);
+  const strokeW=Math.max(1, Math.min(W,H)*0.0022);
+
+  const range=cfg.range_km||5;
+  const predict=cfg.predict_range_km||180;
+  const bearing=cfg.bearing||0, fov=cfg.fov||120;
+
+  // auto-scale: fit farthest shown flight +10%, clamp to [max(range*2,20), predict]
+  const far=flights.reduce((m,f)=>Math.max(m, f.dist_km||0), 0);
+  const lo=Math.max(range*2, 20), hi=Math.max(lo, predict);
+  let scaleKm=Math.min(hi, Math.max(lo, far*1.1));
+  const kmToR = km => (km/scaleKm)*maxR;
+
+  const P=[]; // svg pieces
+  const dark="var(--w)", grey="var(--l)", lite="var(--d)", paper="var(--k)";
+
+  // defs: heading arrowheads (dark for in-view, grey for upcoming)
+  P.push(`<defs>
+    <marker id="ah" markerWidth="7" markerHeight="7" refX="5.5" refY="3" orient="auto">
+      <path d="M0,0 L6,3 L0,6 Z" fill="${dark}"/></marker>
+    <marker id="ahg" markerWidth="7" markerHeight="7" refX="5.5" refY="3" orient="auto">
+      <path d="M0,0 L6,3 L0,6 Z" fill="${grey}"/></marker>
+  </defs>`);
+
+  // view cone wedge (the "what you can see" zone), radius = range scaled
+  const coneR=Math.max(kmToR(range), maxR*0.10);   // keep visible even when tiny
+  const a0=bearing-fov/2, a1=bearing+fov/2;
+  const [x0,y0]=polar(cx,cy,a0,coneR);
+  const [x1,y1]=polar(cx,cy,a1,coneR);
+  const largeArc = fov>180?1:0;
+  P.push(`<path d="M${cx.toFixed(1)},${cy.toFixed(1)} L${x0.toFixed(1)},${y0.toFixed(1)} `+
+         `A${coneR.toFixed(1)},${coneR.toFixed(1)} 0 ${largeArc} 1 ${x1.toFixed(1)},${y1.toFixed(1)} Z" `+
+         `fill="${lite}" fill-opacity="0.5" stroke="${grey}" stroke-width="${strokeW}" stroke-opacity="0.8"/>`);
+  // cone centre-line (viewing bearing) out to the cone edge
+  const [bx,by]=polar(cx,cy,bearing,coneR);
+  P.push(`<line x1="${cx}" y1="${cy}" x2="${bx.toFixed(1)}" y2="${by.toFixed(1)}" stroke="${grey}" stroke-width="${strokeW}" stroke-dasharray="${(fs*0.35).toFixed(1)} ${(fs*0.35).toFixed(1)}"/>`);
+
+  // range rings at round km values
+  const step=niceStep(scaleKm/3);
+  for(let km=step; kmToR(km)<=maxR+0.5; km+=step){
+    const rr=kmToR(km);
+    P.push(`<circle cx="${cx}" cy="${cy}" r="${rr.toFixed(1)}" fill="none" stroke="${lite}" stroke-width="${strokeW}"/>`);
+    // label just above the ring on the north axis
+    P.push(`<text x="${(cx+fs*0.3).toFixed(1)}" y="${(cy-rr+fs*0.9).toFixed(1)}" font-family="Oswald,sans-serif" font-size="${(fs*0.72).toFixed(1)}" fill="${grey}">${km}km</text>`);
+  }
+  // outer boundary
+  P.push(`<circle cx="${cx}" cy="${cy}" r="${maxR.toFixed(1)}" fill="none" stroke="${grey}" stroke-width="${strokeW}"/>`);
+
+  // cardinal ticks + letters (N E S W)
+  const cards=[["N",0],["E",90],["S",180],["W",270]];
+  for(const [lab,ang] of cards){
+    const [tx0,ty0]=polar(cx,cy,ang,maxR);
+    const [tx1,ty1]=polar(cx,cy,ang,maxR-fs*0.7);
+    P.push(`<line x1="${tx0.toFixed(1)}" y1="${ty0.toFixed(1)}" x2="${tx1.toFixed(1)}" y2="${ty1.toFixed(1)}" stroke="${grey}" stroke-width="${strokeW*1.4}"/>`);
+    const [lx,ly]=polar(cx,cy,ang,maxR+fs*0.95);
+    const weight = lab==="N"?"600":"500";
+    P.push(`<text x="${lx.toFixed(1)}" y="${(ly+fs*0.35).toFixed(1)}" text-anchor="middle" font-family="Oswald,sans-serif" font-weight="${weight}" font-size="${(lab==="N"?fs*1.15:fs*0.9).toFixed(1)}" fill="${lab==="N"?dark:grey}">${lab}</text>`);
+  }
+  // north arrow accent above N
+  const [na_x,na_y]=polar(cx,cy,0,maxR+fs*1.6);
+  P.push(`<path d="M${na_x.toFixed(1)},${(na_y-fs*0.5).toFixed(1)} l${(-fs*0.32).toFixed(1)},${(fs*0.7).toFixed(1)} l${(fs*0.64).toFixed(1)},0 Z" fill="${dark}"/>`);
+
+  // aircraft
+  const markR=Math.max(3, fs*0.42);
+  const arrowLen=fs*1.7;
+  for(const f of flights){
+    if(f.dist_km==null||f.bearing_deg==null) continue;
+    const rr=Math.min(kmToR(f.dist_km), maxR); // clamp inside boundary
+    const [x,y]=polar(cx,cy,f.bearing_deg,rr);
+    const inv=f.in_view;
+    // heading arrow along track_deg
+    if(f.track_deg!=null){
+      const dx=Math.sin(f.track_deg*D2R), dy=-Math.cos(f.track_deg*D2R);
+      const ex=x+dx*arrowLen, ey=y+dy*arrowLen;
+      P.push(`<line x1="${x.toFixed(1)}" y1="${y.toFixed(1)}" x2="${ex.toFixed(1)}" y2="${ey.toFixed(1)}" `+
+             `stroke="${inv?dark:grey}" stroke-width="${(strokeW*1.6).toFixed(2)}" marker-end="url(#${inv?"ah":"ahg"})"/>`);
+    }
+    // mark: in-view filled black, upcoming open grey
+    if(inv){
+      P.push(`<circle cx="${x.toFixed(1)}" cy="${y.toFixed(1)}" r="${markR.toFixed(1)}" fill="${dark}" stroke="${paper}" stroke-width="${strokeW}"/>`);
+    }else{
+      P.push(`<circle cx="${x.toFixed(1)}" cy="${y.toFixed(1)}" r="${(markR*0.9).toFixed(1)}" fill="${paper}" stroke="${grey}" stroke-width="${(strokeW*1.5).toFixed(2)}"/>`);
+    }
+    // label: callsign + ETA, offset radially outward to reduce overlap
+    const name=(f.callsign||f.airline||"").toUpperCase().slice(0,7);
+    const tag=name+" "+etaText(f);
+    // push the label out along its bearing to at least a floor radius so
+    // central / close aircraft spread onto a ring instead of piling up
+    const labR=Math.max(rr+markR+fs*0.5, maxR*0.17);
+    const [lx,ly]=polar(cx,cy,f.bearing_deg,labR);
+    const anchor = lx<cx-2?"end":(lx>cx+2?"start":"middle");
+    P.push(`<text x="${lx.toFixed(1)}" y="${(ly+fs*0.32).toFixed(1)}" text-anchor="${anchor}" `+
+           `font-family="Oswald,sans-serif" font-weight="${inv?"600":"500"}" font-size="${(fs*0.74).toFixed(1)}" `+
+           `fill="${inv?dark:grey}">${esc(tag)}</text>`);
+  }
+
+  // home marker at centre (diamond + dot)
+  const hs=Math.max(4, fs*0.55);
+  P.push(`<path d="M${cx},${(cy-hs).toFixed(1)} L${(cx+hs).toFixed(1)},${cy} L${cx},${(cy+hs).toFixed(1)} L${(cx-hs).toFixed(1)},${cy} Z" fill="${paper}" stroke="${dark}" stroke-width="${(strokeW*1.6).toFixed(2)}"/>`);
+  P.push(`<circle cx="${cx}" cy="${cy}" r="${(hs*0.34).toFixed(1)}" fill="${dark}"/>`);
+
+  svg.innerHTML=P.join("");
+}
+
+/* ---------------- draw ---------------- */
+
+function draw(data){
+  const cfg=(data&&data.config)||SAMPLE.config;
+  const flights=(data&&data.flights)||[];
+  // API already sorts in_view first, then eta; keep that order for the list
   const rows=[];
-  for(let i=0;i<ROWS;i++) rows.push(rowHtml(inView[i]||null));
+  for(let i=0;i<ROWS;i++) rows.push(rowHtml(flights[i]||null));
   document.getElementById("board").innerHTML=rows.join("");
-  document.getElementById("cols").innerHTML=COLS.map(([label,n],i)=>{
+  document.getElementById("cols").innerHTML=COLS.map(([label,n])=>{
     const w=`calc(${n} * (var(--tile-w) + var(--tile-gap)) - var(--tile-gap))`;
     return `<span style="width:${w}">${label}</span>`;
   }).join("");
+
+  const nView=flights.filter(f=>f.in_view).length;
+  const nIn=flights.length-nView;
   document.getElementById("foot-r").textContent=
-    `IN VIEW ${inView.length}${inView.length>ROWS?` · +${inView.length-ROWS} MORE`:""}`;
+    `IN VIEW ${nView} · ${nIn} INBOUND`;
+  document.getElementById("foot-l").textContent=
+    `WINDOW WATCH · ${Math.round(cfg.bearing)}° ${cardinal(cfg.bearing)} · ${Math.round(cfg.range_km)} KM`;
+
   const now=new Date();
   document.getElementById("clock").textContent=
     String(now.getHours()).padStart(2,"0")+":"+String(now.getMinutes()).padStart(2,"0");
+
+  buildMap(cfg, flights);
 }
 
 /* Live when served next to serve.py; sample when opened standalone */
+let LAST=SAMPLE;
 layout();
-addEventListener("resize", ()=>{ layout(); });
-fetch("/api/visible",{cache:"no-store"})
+addEventListener("resize", ()=>{ layout(); draw(LAST); });
+fetch("/api/board",{cache:"no-store"})
   .then(r=>{ if(!r.ok) throw 0; return r.json(); })
-  .then(draw)
-  .catch(()=>draw(SAMPLE));
+  .then(d=>{ LAST=d; draw(d); })
+  .catch(()=>{ LAST=SAMPLE; draw(SAMPLE); });
 </script>
 </body>
 </html>

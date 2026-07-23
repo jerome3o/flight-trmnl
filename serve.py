@@ -462,6 +462,113 @@ def visible_aircraft(cfg, all_traffic=False):
     return out
 
 
+# ------------------------------------------------------------- prediction
+# How far out to scan for approaching traffic, and how far ahead to look.
+# A fast jet covers ~170 km in 10 min, so scan a wide radius but only keep
+# aircraft that actually reach the (small) view cone within the horizon.
+PREDICT_RANGE_KM = float(os.environ.get("PREDICT_RANGE_KM", "180"))
+PREDICT_HORIZON_S = int(float(os.environ.get("PREDICT_HORIZON_MIN", "10")) * 60)
+PREDICT_STEP_S = int(os.environ.get("PREDICT_STEP_S", "20"))
+MAX_BOARD_FLIGHTS = int(os.environ.get("MAX_BOARD_FLIGHTS", "14"))
+
+
+def project_position(lat, lon, track_deg, dist_km):
+    """Great-circle destination point dist_km along heading track_deg."""
+    d = dist_km / EARTH_R_KM
+    b = math.radians(track_deg)
+    p1, l1 = math.radians(lat), math.radians(lon)
+    p2 = math.asin(math.sin(p1) * math.cos(d)
+                   + math.cos(p1) * math.sin(d) * math.cos(b))
+    l2 = l1 + math.atan2(math.sin(b) * math.sin(d) * math.cos(p1),
+                         math.cos(d) - math.sin(p1) * math.sin(p2))
+    return math.degrees(p2), math.degrees(l2)
+
+
+def _entry_eta_s(cfg, lat, lon, alt_ft, gs_kt, track_deg, vs_fpm, half):
+    """Seconds until the aircraft first enters the view cone (bearing within
+    FOV, within range, high enough), extrapolating its current heading/speed/
+    climb — or None if it never does within the horizon. Straight-line
+    projection: good for a ~10 min look-ahead, approximate for turning traffic."""
+    if not gs_kt or gs_kt < 30 or track_deg is None:
+        return None
+    for t in range(PREDICT_STEP_S, PREDICT_HORIZON_S + 1, PREDICT_STEP_S):
+        dist_km = gs_kt * 1.852 * (t / 3600.0)   # kt -> km/h -> km in t s
+        plat, plon = project_position(lat, lon, track_deg, dist_km)
+        d = haversine_km(cfg["lat"], cfg["lon"], plat, plon)
+        if d > cfg["range_km"]:
+            continue
+        if angle_diff(bearing_deg(cfg["lat"], cfg["lon"], plat, plon),
+                      cfg["bearing"]) > half:
+            continue
+        a = (alt_ft + (vs_fpm or 0) * (t / 60.0)) if alt_ft is not None else None
+        elev = elevation_deg(d, a) if a is not None else None
+        if elev is None or elev >= cfg["min_elev"]:
+            return t
+    return None
+
+
+def board_data(cfg):
+    """In-view + soon-to-be-in-view aircraft for the display, each tagged with
+    eta_min (0 = currently in view). Also returns the view-cone config so the
+    board can draw the map."""
+    ac_list = fetch_upstream(cfg["source"], cfg["lat"], cfg["lon"], PREDICT_RANGE_KM)
+    half = cfg["fov"] / 2.0
+    out = []
+    for ac in ac_list:
+        lat, lon = ac.get("lat"), ac.get("lon")
+        if lat is None or lon is None:
+            continue
+        alt = ac.get("alt_geom", ac.get("alt_baro"))
+        if alt == "ground":
+            continue
+        alt_ft = float(alt) if isinstance(alt, (int, float)) else None
+        gs, track = ac.get("gs"), ac.get("track")
+        vs = ac.get("geom_rate", ac.get("baro_rate"))
+        dist = haversine_km(cfg["lat"], cfg["lon"], lat, lon)
+        brg = bearing_deg(cfg["lat"], cfg["lon"], lat, lon)
+        elev = elevation_deg(dist, alt_ft) if alt_ft is not None else None
+        in_view = (dist <= cfg["range_km"]
+                   and angle_diff(brg, cfg["bearing"]) <= half
+                   and (elev is None or elev >= cfg["min_elev"]))
+        eta_s = 0 if in_view else _entry_eta_s(cfg, lat, lon, alt_ft, gs, track, vs, half)
+        if eta_s is None:
+            continue
+        type_code = ac.get("t")
+        callsign = (ac.get("flight") or "").strip() or ac.get("r") or ac.get("hex")
+        out.append({
+            "hex": ac.get("hex"),
+            "callsign": callsign,
+            "airline": airline_for(callsign, ac.get("ownOp")),
+            "type": type_code,
+            "type_desc": ac.get("desc") or TYPE_NAMES.get(type_code),
+            "in_view": in_view,
+            "eta_min": round(eta_s / 60.0, 1),
+            "bearing_deg": round(brg, 1),
+            "dist_km": round(dist, 2),
+            "track_deg": track,
+            "alt_ft": alt_ft,
+            "gs_kt": gs,
+        })
+    # in-view first, then soonest arrivals; keep the board readable
+    out.sort(key=lambda f: (not f["in_view"], f["eta_min"], f["dist_km"]))
+    out = out[:MAX_BOARD_FLIGHTS]
+    routes = lookup_routes([(f["callsign"], f["bearing_deg"], f["dist_km"]) for f in out])
+    for f in out:
+        r = routes.get(f["callsign"])
+        f["origin"] = r[0] if r else None
+        f["destination"] = r[1] if r else None
+    return {
+        "config": {
+            "bearing": cfg["bearing"],
+            "fov": cfg["fov"],
+            "range_km": cfg["range_km"],
+            "predict_range_km": PREDICT_RANGE_KM,
+            "horizon_min": PREDICT_HORIZON_S / 60.0,
+        },
+        "flights": out,
+    }
+
+
 
 # ---------------------------------------------------------------- byos
 # TRMNL firmware endpoints, so a device pointed at this server (WiFi setup
@@ -601,6 +708,8 @@ class Handler(SimpleHTTPRequestHandler):
             return super().do_GET()
         if parsed.path == "/api/visible":
             return self.handle_api(parsed)
+        if parsed.path == "/api/board":
+            return self.handle_board()
         if parsed.path in ("/api/setup", "/api/setup/"):
             mac = self.headers.get("ID", "unknown")
             if not _mac_allowed(mac):
@@ -647,6 +756,17 @@ class Handler(SimpleHTTPRequestHandler):
         if self.headers.get("X-Forwarded-For"):
             return False
         return self.client_address[0] in ("127.0.0.1", "::1", "localhost")
+
+    def handle_board(self):
+        # The board is rendered locally and uses your configured home location,
+        # so this is local-only (like the default /api/visible).
+        if not self._is_local():
+            return self._json(403, {"error": "board data is local-only"})
+        try:
+            data = board_data(dict(DEFAULTS))
+        except Exception as e:
+            return self._json(502, {"error": f"upstream {DEFAULTS['source']} failed: {e}"})
+        return self._json(200, data)
 
     def handle_api(self, parsed):
         q = parse_qs(parsed.query)

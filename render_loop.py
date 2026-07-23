@@ -114,8 +114,8 @@ def placeholder():
         return
     with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as t:
         tmp = t.name
-    subprocess.run([MAGICK, "-size", f"{WIDTH}x{HEIGHT}", "xc:#000000",
-                    "-fill", "#ffffff", "-gravity", "center",
+    subprocess.run([MAGICK, "-size", f"{WIDTH}x{HEIGHT}", "xc:#ffffff",
+                    "-fill", "#000000", "-gravity", "center",
                     "-pointsize", str(max(24, HEIGHT // 14)), "-annotate", "0",
                     "OVERHEAD\nwaiting for first render…", tmp],
                    check=False, capture_output=True)
