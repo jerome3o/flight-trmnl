@@ -2,18 +2,24 @@
 """
 render_loop.py — keeps latest.png fresh for the BYOS display endpoint.
 
-Loop: headless Chrome screenshots the split-flap board at 800x480,
-ImageMagick quantizes it to the TRMNL 2-bit greyscale palette
-(#000/#555/#aaa/#fff, per TRMNL's own ImageMagick guide), and the result
-is atomically swapped into place. serve.py's /api/display hands the
-device a content-hash filename, so a render identical to the last one
-costs the e-ink nothing.
+Loop: headless Chrome screenshots the split-flap board at the panel's native
+resolution, ImageMagick quantizes it to a TRMNL greyscale palette (per
+TRMNL's own ImageMagick guide), and the result is atomically swapped into
+place. serve.py's /api/display hands the device a content-hash filename, so a
+render identical to the last one costs the e-ink nothing.
+
+Match RENDER_WIDTH/HEIGHT/DEPTH to your device — the firmware rejects any
+image that isn't the panel's exact size and does not scale:
+  · TRMNL X  (10.3"): 1872x1404, 4bit  (16-level greyscale PNG)  ← default
+  · TRMNL OG (7.5") :  800x480,  2bit  (4-level greyscale) or 1bit (legacy)
 
 Environment:
   BOARD_URL        default http://127.0.0.1:8000/trmnl-board.html
   RENDER_OUT       default latest.png (must match serve.py's RENDER_OUT)
   RENDER_INTERVAL  seconds between renders, default 55
-  RENDER_DEPTH     "2bit" (default, FW 1.6.0+ greyscale) or "1bit" (legacy)
+  RENDER_WIDTH     panel width in px, default 1872
+  RENDER_HEIGHT    panel height in px, default 1404
+  RENDER_DEPTH     "4bit" (default, TRMNL X) | "2bit" | "1bit" (legacy)
 """
 
 import os
@@ -27,13 +33,18 @@ import urllib.request
 BOARD_URL = os.environ.get("BOARD_URL", "http://127.0.0.1:8000/trmnl-board.html")
 OUT = os.environ.get("RENDER_OUT", "latest.png")
 INTERVAL = int(os.environ.get("RENDER_INTERVAL", "55"))
-DEPTH = os.environ.get("RENDER_DEPTH", "2bit")
+WIDTH = int(os.environ.get("RENDER_WIDTH", "1872"))
+HEIGHT = int(os.environ.get("RENDER_HEIGHT", "1404"))
+DEPTH = os.environ.get("RENDER_DEPTH", "4bit")
+
+# Firmware image-size ceiling: ~90 KB on OG boards, ~750 KB on X-class PSRAM.
+MAX_IMAGE_BYTES = int(os.environ.get("RENDER_MAX_BYTES", "750000"))
 
 CHROME_CANDIDATES = ["chromium", "chromium-browser", "google-chrome",
                      "google-chrome-stable", "chrome"]
 CHROME_FLAGS = ["--no-sandbox", "--disable-gpu", "--disable-dev-shm-usage",
-                "--hide-scrollbars", "--window-size=800,480",
-                "--virtual-time-budget=4000"]
+                "--hide-scrollbars", f"--window-size={WIDTH},{HEIGHT}",
+                "--force-device-scale-factor=1", "--virtual-time-budget=4000"]
 
 
 def log(msg):
@@ -52,11 +63,17 @@ MAGICK = find(["magick"]) or find(["convert"])
 
 
 def quantize(src, dst):
-    """Map to the exact TRMNL palette. 2-bit: 4 greys; 1-bit: black/white."""
+    """Reduce the screenshot to the TRMNL greyscale depth the panel expects.
+    4-bit: 16 greys (TRMNL X); 2-bit: 4 greys; 1-bit: black/white (legacy).
+    Recipes follow TRMNL's ImageMagick guide (posterize + -depth per mode)."""
     if DEPTH == "1bit":
         cmd = [MAGICK, src, "-dither", "FloydSteinberg",
                "-remap", "pattern:gray50", "-depth", "1", "-strip", f"png:{dst}"]
-    else:
+    elif DEPTH == "4bit":
+        cmd = [MAGICK, src, "-colorspace", "Gray", "-dither", "FloydSteinberg",
+               "-posterize", "16", "-alpha", "off", "-depth", "4",
+               "-strip", f"png:{dst}"]
+    else:  # 2bit
         with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as cm:
             cmap = cm.name
         subprocess.run([MAGICK, "-size", "4x1",
@@ -83,6 +100,10 @@ def publish(tmp):
     """Atomic swap so /api/display never serves a half-written file."""
     final_tmp = OUT + ".tmp"
     quantize(tmp, final_tmp)
+    size = os.path.getsize(final_tmp)
+    if size > MAX_IMAGE_BYTES:
+        log(f"WARNING: image is {size} bytes (> {MAX_IMAGE_BYTES}); the device "
+            f"may reject it as too big. Consider a lower RENDER_DEPTH.")
     os.replace(final_tmp, OUT)
 
 
@@ -93,9 +114,9 @@ def placeholder():
         return
     with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as t:
         tmp = t.name
-    subprocess.run([MAGICK, "-size", "800x480", "xc:#000000",
+    subprocess.run([MAGICK, "-size", f"{WIDTH}x{HEIGHT}", "xc:#000000",
                     "-fill", "#ffffff", "-gravity", "center",
-                    "-pointsize", "34", "-annotate", "0",
+                    "-pointsize", str(max(24, HEIGHT // 14)), "-annotate", "0",
                     "OVERHEAD\nwaiting for first render…", tmp],
                    check=False, capture_output=True)
     try:
@@ -123,7 +144,7 @@ def main():
     if not MAGICK:
         log("ImageMagick not found — renderer disabled")
         sys.exit(0)
-    log(f"chrome={CHROME} magick={MAGICK} depth={DEPTH} "
+    log(f"chrome={CHROME} magick={MAGICK} {WIDTH}x{HEIGHT} depth={DEPTH} "
         f"every {INTERVAL}s -> {OUT}")
     placeholder()
     if not wait_for_server():

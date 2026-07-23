@@ -24,7 +24,11 @@ services:
       # ROUTE_STRICT: "1"      # require both DBs to agree on a route, else blank
 
       # --- BYOS display (point the TRMNL at http://<host-ip>:8000) ---
-      # RENDER_DEPTH: "2bit"   # 2bit (FW 1.6.0+ greyscale) | 1bit (legacy)
+      # Match your panel; firmware rejects a wrong-sized image (see .env.example)
+      # RENDER_WIDTH: "1872"    # TRMNL X: 1872x1404 4bit | OG: 800x480 2bit
+      # RENDER_HEIGHT: "1404"
+      # RENDER_DEPTH: "4bit"    # 4bit (TRMNL X) | 2bit | 1bit (legacy)
+      # DEVICE_SALT: "long-random-secret"  # REQUIRED for a public deployment
 
       # --- optional TRMNL-cloud webhook path (not needed for BYOS) ---
       # TRMNL_PLUGIN_UUID: "plugin-setting-uuid"

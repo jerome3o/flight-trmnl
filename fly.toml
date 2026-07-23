@@ -1,0 +1,35 @@
+# Fly.io config for the window-flights BYOS server.
+#
+# First-time deploy (from this directory, with the flyctl CLI installed):
+#   fly launch --no-deploy --copy-config --name <your-unique-app-name>
+#   fly secrets set LAT=51.5 LON=-0.1 DEVICE_SALT="$(python3 -c 'import secrets;print(secrets.token_hex(24))')"
+#   fly deploy
+# Then your board is at https://<your-unique-app-name>.fly.dev — point the
+# TRMNL at that URL (WiFi setup > Advanced > Custom Server, no trailing slash).
+#
+# Set `app` below to the name you chose (must be globally unique on Fly).
+app = "flight-trmnl"
+primary_region = "lhr"   # London; pick your nearest https://fly.io/docs/reference/regions/
+
+[build]
+  dockerfile = "Dockerfile"
+
+[env]
+  # Panel resolution for the TRMNL X. Location + DEVICE_SALT come from
+  # `fly secrets set` (never commit those). Override here for a TRMNL OG.
+  RENDER_WIDTH = "1872"
+  RENDER_HEIGHT = "1404"
+  RENDER_DEPTH = "4bit"
+  REFRESH_RATE = "60"
+
+[http_service]
+  internal_port = 8000
+  force_https = true          # Fly terminates TLS and sets X-Forwarded-Proto=https
+  auto_stop_machines = false  # the device polls continuously; keep it always-on
+  auto_start_machines = true
+  min_machines_running = 1
+
+[[vm]]
+  # Headless Chromium rendering 1872x1404 needs real memory.
+  size = "shared-cpu-1x"
+  memory = "1gb"

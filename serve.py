@@ -35,6 +35,7 @@ import json
 import math
 import re
 import sys
+import hmac
 import hashlib
 import urllib.request
 from datetime import datetime, timezone
@@ -464,13 +465,42 @@ def visible_aircraft(cfg, all_traffic=False):
 
 # ---------------------------------------------------------------- byos
 # TRMNL firmware endpoints, so a device pointed at this server (WiFi setup
-# > Advanced > Custom Server > http://<host>:8000) works with no cloud.
+# > Advanced > Custom Server > https://<your-host>) works with no cloud.
 # The renderer (render_loop.py) keeps IMAGE_PATH fresh; /api/display hands
 # the device its URL with a content-hash filename so unchanged screens
 # skip the e-ink redraw entirely.
+#
+# Auth: /api/setup issues the device a deterministic api_key derived from its
+# MAC and the secret DEVICE_SALT; the firmware echoes it back as the
+# Access-Token header on every /api/display. We recompute and check it (no
+# state to lose across restarts), and the rendered board is only reachable at
+# an unguessable path derived from DEVICE_SALT — so the URL alone does not
+# expose your board.
 IMAGE_PATH = os.environ.get("RENDER_OUT", "latest.png")
 REFRESH_RATE = int(os.environ.get("REFRESH_RATE", "60"))
 DEVICE_SALT = os.environ.get("DEVICE_SALT", "window-flights")
+
+if DEVICE_SALT == "window-flights":
+    print("[byos] WARNING: DEVICE_SALT is unset (using the public default). "
+          "Anyone who reads the source can derive your board URL and device "
+          "keys. Set DEVICE_SALT to a long random secret before exposing this "
+          "server to the internet.", file=sys.stderr, flush=True)
+
+
+def _device_key(mac):
+    """Per-device api_key = HMAC(DEVICE_SALT, mac). Deterministic, so a
+    correct device always presents the same Access-Token and we never need to
+    persist anything."""
+    return hmac.new(DEVICE_SALT.encode(), (mac or "").encode(),
+                    hashlib.sha256).hexdigest()[:20]
+
+
+# Unguessable, stable path the board image is served at (one board, shared by
+# every authorised device). Only a device that passes /api/display auth is
+# told this URL.
+SCREEN_TOKEN = hmac.new(DEVICE_SALT.encode(), b"screen-image",
+                        hashlib.sha256).hexdigest()[:24]
+SCREEN_PATH = f"/screen/{SCREEN_TOKEN}.png"
 
 
 def _image_state():
@@ -483,22 +513,21 @@ def _image_state():
         return False, "not-ready"
 
 
-def byos_setup(mac):
-    key = hashlib.sha1(f"{DEVICE_SALT}:{mac}".encode()).hexdigest()[:20]
+def byos_setup(mac, base_url):
     return {
         "status": 200,
-        "api_key": key,
-        "friendly_id": "PLANES" + mac.replace(":", "")[-4:].upper(),
-        "image_url": None,   # filled by caller with an absolute URL
+        "api_key": _device_key(mac),
+        "friendly_id": "PLANES" + (mac or "").replace(":", "")[-4:].upper(),
+        "image_url": base_url + SCREEN_PATH,
         "message": "Welcome aboard — overhead board ready.",
     }
 
 
-def byos_display(host):
+def byos_display(base_url):
     ready, token = _image_state()
     return {
         "status": 0,
-        "image_url": f"http://{host}/{IMAGE_PATH}",
+        "image_url": base_url + SCREEN_PATH,
         "image_url_timeout": 0,
         "filename": token,
         "refresh_rate": REFRESH_RATE if ready else 10,  # poll fast until first render
@@ -509,8 +538,36 @@ def byos_display(host):
     }
 
 
+def byos_reset(message):
+    """Sent when the Access-Token is missing/invalid: tells a desynced device
+    to re-pair, and hands an attacker no image_url."""
+    return {
+        "status": 500,
+        "reset_firmware": False,
+        "image_url": None,
+        "refresh_rate": 60,
+        "special_function": "sleep",
+        "error": message,
+    }
+
+
+# Only these static files are served directly; everything else (the .py
+# source, the raw image file, dotfiles) is 404'd so a public URL can't be
+# scraped for the board or the code.
+STATIC_WHITELIST = {"/window-flights.html", "/trmnl-board.html"}
+
+
 # ---------------------------------------------------------------- server
 class Handler(SimpleHTTPRequestHandler):
+    def _public_base(self):
+        """External base URL, honouring a TLS-terminating proxy (Fly, etc.).
+        The firmware won't follow 301/302 for image fetches, so the scheme we
+        hand back must already be the real one (https behind the proxy)."""
+        proto = (self.headers.get("X-Forwarded-Proto") or "http").split(",")[0].strip()
+        host = (self.headers.get("X-Forwarded-Host")
+                or self.headers.get("Host") or "localhost")
+        return f"{proto}://{host}"
+
     def do_GET(self):
         parsed = urlparse(self.path)
         if parsed.path == "/":
@@ -520,22 +577,53 @@ class Handler(SimpleHTTPRequestHandler):
             return self.handle_api(parsed)
         if parsed.path in ("/api/setup", "/api/setup/"):
             mac = self.headers.get("ID", "unknown")
-            body = byos_setup(mac)
-            body["image_url"] = f"http://{self.headers.get('Host','localhost')}/{IMAGE_PATH}"
             print(f"[byos] setup from device {mac}", flush=True)
-            return self._json(200, body)
+            return self._json(200, byos_setup(mac, self._public_base()))
         if parsed.path in ("/api/display", "/api/display/"):
             mac = self.headers.get("ID", "?")
+            token = self.headers.get("Access-Token") or self.headers.get("access-token")
             batt = self.headers.get("BATTERY_VOLTAGE") or self.headers.get("Battery-Voltage")
             rssi = self.headers.get("RSSI") or self.headers.get("Rssi")
+            if not hmac.compare_digest(token or "", _device_key(mac)):
+                print(f"[byos] display DENIED for {mac} (bad/missing token)", flush=True)
+                return self._json(200, byos_reset("unrecognised device"))
             print(f"[byos] display poll from {mac} batt={batt} rssi={rssi}", flush=True)
-            return self._json(200, byos_display(self.headers.get("Host", "localhost")))
+            return self._json(200, byos_display(self._public_base()))
+        if parsed.path == SCREEN_PATH:
+            return self.serve_screen()
         if parsed.path == "/proxy":
             return self.handle_proxy(parsed)
-        return super().do_GET()
+        if parsed.path in STATIC_WHITELIST:
+            return super().do_GET()
+        return self._json(404, {"error": "not found"})
+
+    def serve_screen(self):
+        try:
+            with open(IMAGE_PATH, "rb") as fh:
+                data = fh.read()
+        except OSError:
+            return self._json(404, {"error": "no board rendered yet"})
+        self.send_response(200)
+        self.send_header("Content-Type", "image/png")
+        self.send_header("Content-Length", str(len(data)))
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        self.wfile.write(data)
+
+    def _is_local(self):
+        """True only for same-container callers (the board renderer). External
+        traffic arrives via the hosting proxy with an X-Forwarded-For header."""
+        if self.headers.get("X-Forwarded-For"):
+            return False
+        return self.client_address[0] in ("127.0.0.1", "::1", "localhost")
 
     def handle_api(self, parsed):
         q = parse_qs(parsed.query)
+        # The no-parameter default is your configured home location — only hand
+        # that out to the local board renderer. External callers must pass their
+        # own lat/lon so a public URL can't be used to infer where you are.
+        if not self._is_local() and not ("lat" in q and "lon" in q):
+            return self._json(400, {"error": "lat and lon query params required"})
         cfg = dict(DEFAULTS)
         try:
             for key in ("lat", "lon", "bearing", "fov", "range_km", "min_elev"):

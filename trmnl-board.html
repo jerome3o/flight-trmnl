@@ -2,15 +2,16 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<title>Overhead — split-flap board (800×480)</title>
+<title>Overhead — split-flap board</title>
 <!--
   Split-flap "departure board" screen for TRMNL BYOS rendering.
 
-  · Body is exactly 800×480 — point headless Chrome at it:
-      chromium --headless --window-size=800,480 --screenshot=shot.png board.html
-    then quantize with the 2-bit colormap (see notes). All colours below are
-    already restricted to the 4-level palette (#000/#555/#aaa/#fff), so the
-    quantize step changes nothing visually.
+  · Resolution-independent: the layout fills the viewport, so the same file
+    renders correctly at 800×480 (TRMNL OG) or 1872×1404 (TRMNL X). Point
+    headless Chrome at it with a window matching the panel:
+      chromium --headless --window-size=1872,1404 --screenshot=shot.png board.html
+    then quantize (see render_loop.py). Tile size and the number of visible
+    rows are computed from the viewport by layout() below.
   · Data: tries GET /api/visible (same-origin, i.e. when served by serve.py);
     falls back to embedded SAMPLE data so the file previews standalone.
   · Font: Oswald via Google Fonts for previewing. In the docker image, bundle
@@ -26,32 +27,36 @@
     --d:#555555;   /* dark grey — seams, dead flaps      */
     --l:#aaaaaa;   /* light grey — furniture, labels     */
     --w:#ffffff;   /* flap text                          */
+    /* All sizes below are set by layout() from the viewport; these are
+       just fallbacks that reproduce the original 800×480 board. */
     --tile-w:20px; --tile-h:46px; --tile-gap:2px; --col-gap:11px;
+    --pad-x:12px; --pad-y:9px; --brand-fs:22px; --label-fs:11px;
+    --tile-fs:26px; --seam-h:1px;
   }
   *{box-sizing:border-box;margin:0;padding:0}
-  html,body{width:800px;height:480px;overflow:hidden}
+  html,body{width:100vw;height:100vh;overflow:hidden}
   body{
     background:var(--k);
     font-family:'Oswald','Arial Narrow',Arial,sans-serif;
     color:var(--w);
-    padding:10px 12px 8px;
+    padding:var(--pad-y) var(--pad-x);
     display:flex;flex-direction:column;
   }
 
   /* ---- header ---- */
   header{
     display:flex;justify-content:space-between;align-items:baseline;
-    border-bottom:2px solid var(--l);
-    padding-bottom:6px;margin-bottom:6px;
+    border-bottom:calc(var(--seam-h)*2) solid var(--l);
+    padding-bottom:calc(var(--pad-y)*.7);margin-bottom:calc(var(--pad-y)*.7);
   }
-  .brand{font-size:22px;font-weight:600;letter-spacing:.12em;color:var(--w)}
-  .brand small{color:var(--l);font-weight:500;letter-spacing:.18em;font-size:12px;margin-left:10px}
-  .clock{font-size:22px;font-weight:600;letter-spacing:.08em;color:var(--w)}
+  .brand{font-size:var(--brand-fs);font-weight:600;letter-spacing:.12em;color:var(--w)}
+  .brand small{color:var(--l);font-weight:500;letter-spacing:.18em;font-size:calc(var(--brand-fs)*.55);margin-left:.5em}
+  .clock{font-size:var(--brand-fs);font-weight:600;letter-spacing:.08em;color:var(--w)}
 
   /* ---- column labels ---- */
-  .cols{display:flex;gap:var(--col-gap);margin-bottom:4px}
+  .cols{display:flex;gap:var(--col-gap);margin-bottom:calc(var(--pad-y)*.5)}
   .cols span{
-    font-size:11px;font-weight:500;letter-spacing:.22em;color:var(--l);
+    font-size:var(--label-fs);font-weight:500;letter-spacing:.22em;color:var(--l);
     text-transform:uppercase;
   }
 
@@ -63,26 +68,26 @@
     width:var(--tile-w);height:var(--tile-h);
     background:var(--k);
     border:1px solid var(--d);
-    border-radius:3px;
+    border-radius:calc(var(--tile-w)*.15);
     position:relative;
     display:flex;align-items:center;justify-content:center;
-    font-size:26px;font-weight:600;line-height:1;color:var(--w);
+    font-size:var(--tile-fs);font-weight:600;line-height:1;color:var(--w);
     text-transform:uppercase;
   }
   /* the split-flap seam */
   .tile::after{
     content:"";position:absolute;left:0;right:0;top:50%;
-    height:1px;background:var(--d);
+    height:var(--seam-h);background:var(--d);
   }
   .tile.blank{color:var(--d)}          /* empty flap */
   .tile.dim{color:var(--l)}            /* secondary info flaps */
 
   /* ---- footer ---- */
   footer{
-    border-top:1px solid var(--d);
-    margin-top:6px;padding-top:5px;
+    border-top:var(--seam-h) solid var(--d);
+    margin-top:calc(var(--pad-y)*.7);padding-top:calc(var(--pad-y)*.55);
     display:flex;justify-content:space-between;
-    font-size:11px;letter-spacing:.2em;color:var(--l);text-transform:uppercase;
+    font-size:var(--label-fs);letter-spacing:.2em;color:var(--l);text-transform:uppercase;
   }
 </style>
 </head>
@@ -104,7 +109,39 @@
 /* Column layout: [label, width-in-tiles, dim?] */
 const COLS=[["AIRLINE",15,false],["FROM",4,false],["TYPE",4,true],
             ["FLIGHT",7,true],["FL",3,false]];
-const ROWS=5;
+let ROWS=5;   /* recomputed from the viewport by layout() */
+
+/* Size the board to whatever panel we're rendered at (OG 800×480 or X
+   1872×1404): derive tile size from the width so all 33 columns fit, then
+   fill the available height with as many split-flap rows as it takes. */
+function layout(){
+  const set=document.documentElement.style;
+  const W=window.innerWidth, H=window.innerHeight;
+  const nCols   = COLS.reduce((a,c)=>a+c[1],0);       // 33 tiles across
+  const nGroups = COLS.length;                          // 5 column groups
+  const nTileGap= COLS.reduce((a,c)=>a+c[1]-1,0);      // gaps within groups
+  const padX = Math.round(W*0.015);
+  // width budget: tileW*nCols + (0.1*tileW)*nTileGap + (0.55*tileW)*(nGroups-1)
+  const denom = nCols + 0.1*nTileGap + 0.55*(nGroups-1);
+  const tileW = (W - 2*padX) / denom;
+  const tileH = tileW*2.3;
+  const padY  = Math.round(H*0.02);
+  const labelFs = Math.max(9, Math.round(tileW*0.55));
+  set.setProperty("--pad-x", padX+"px");
+  set.setProperty("--pad-y", padY+"px");
+  set.setProperty("--tile-w", tileW.toFixed(2)+"px");
+  set.setProperty("--tile-h", tileH.toFixed(2)+"px");
+  set.setProperty("--tile-gap", (tileW*0.1).toFixed(2)+"px");
+  set.setProperty("--col-gap", (tileW*0.55).toFixed(2)+"px");
+  set.setProperty("--brand-fs", Math.round(tileH*0.5)+"px");
+  set.setProperty("--label-fs", labelFs+"px");
+  set.setProperty("--tile-fs", Math.round(tileH*0.58)+"px");
+  set.setProperty("--seam-h", Math.max(1, Math.round(tileH*0.022))+"px");
+  // how many rows fit once header / column labels / footer are accounted for
+  const chrome = padY*5 + tileH + labelFs*4.2;
+  const rowStride = tileH*1.22;
+  ROWS = Math.max(1, Math.min(24, Math.floor((H - chrome) / rowStride)));
+}
 
 /* Fallback sample — same shape as /api/visible records */
 const SAMPLE=[
@@ -162,6 +199,8 @@ function draw(planes){
 }
 
 /* Live when served next to serve.py; sample when opened standalone */
+layout();
+addEventListener("resize", ()=>{ layout(); });
 fetch("/api/visible",{cache:"no-store"})
   .then(r=>{ if(!r.ok) throw 0; return r.json(); })
   .then(draw)
