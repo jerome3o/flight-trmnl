@@ -108,12 +108,20 @@
   .tile.blank{color:var(--d)}          /* empty flap */
   .tile.dim{color:var(--l)}            /* secondary info flaps */
 
-  /* airline: de-emphasised plain text, no split-flap tiles */
+  /* airline: de-emphasised plain text, no split-flap tiles.
+     Two lines — airline name, then the origin city + country in full. */
   .airline{
-    display:flex;align-items:center;
-    font-size:var(--airline-fs);font-weight:500;line-height:1.05;
-    letter-spacing:.02em;color:var(--l);text-transform:uppercase;
-    overflow:hidden;white-space:nowrap;
+    display:flex;flex-direction:column;justify-content:center;
+    font-size:var(--airline-fs);line-height:1.08;
+    letter-spacing:.02em;color:var(--l);overflow:hidden;
+  }
+  .airline .nm{
+    font-weight:600;text-transform:uppercase;
+    white-space:nowrap;overflow:hidden;text-overflow:ellipsis;
+  }
+  .airline .sub{
+    font-size:.82em;font-weight:400;color:var(--l);opacity:.85;
+    white-space:nowrap;overflow:hidden;text-overflow:ellipsis;
   }
 
   /* ---- footer ---- */
@@ -148,9 +156,8 @@
    kind "text" = de-emphasised plain airline text; "tile" = split-flap tiles.
    Flight-number (callsign) and flight-level columns are gone on purpose —
    the user only cares about the route, not the flight id. */
-const COLS=[["AIRLINE",9,"text",false],
+const COLS=[["AIRLINE",11,"text",false],
             ["FROM",3,"tile",false],
-            ["CTY", 2,"tile",true ],
             ["TO",  3,"tile",false],
             ["TYPE",4,"tile",true ],
             ["ETA", 4,"tile",false]];
@@ -215,28 +222,28 @@ const SAMPLE={
   flights:[
     {callsign:"BAW23", airline:"BRITISH AIRWAYS", type:"A21N",
      in_view:true, eta_min:0, bearing_deg:168.0, dist_km:5.2, track_deg:270,
-     alt_ft:5900, origin:{iata:"CDG",country:"FR"}, destination:{iata:"LHR",country:"GB"}},
+     alt_ft:5900, origin:{iata:"CDG",city:"Paris",country:"FR"}, destination:{iata:"LHR",country:"GB"}},
     {callsign:"CFE21B", airline:"BA CITYFLYER", type:"E190",
      in_view:true, eta_min:0, bearing_deg:200.0, dist_km:8.4, track_deg:305,
-     alt_ft:5200, origin:{iata:"DUB",country:"IE"}, destination:{iata:"LCY",country:"GB"}},
+     alt_ft:5200, origin:{iata:"DUB",city:"Dublin",country:"IE"}, destination:{iata:"LCY",country:"GB"}},
     {callsign:"KLM43W", airline:"KLM", type:"B738",
      in_view:false, eta_min:3.0, bearing_deg:150, dist_km:17.5, track_deg:322,
-     alt_ft:9000, origin:{iata:"AMS",country:"NL"}, destination:{iata:"LHR",country:"GB"}},
+     alt_ft:9000, origin:{iata:"AMS",city:"Amsterdam",country:"NL"}, destination:{iata:"LHR",country:"GB"}},
     {callsign:"VIR5F", airline:"VIRGIN ATLANTIC", type:"A35K",
      in_view:false, eta_min:5.0, bearing_deg:132, dist_km:42.0, track_deg:300,
-     alt_ft:12000, origin:{iata:"JFK",country:"US"}, destination:{iata:"LHR",country:"GB"}},
+     alt_ft:12000, origin:{iata:"JFK",city:"New York",country:"US"}, destination:{iata:"LHR",country:"GB"}},
     {callsign:"EZY31KG", airline:"EASYJET", type:"A320",
      in_view:false, eta_min:6.0, bearing_deg:212, dist_km:55.0, track_deg:40,
-     alt_ft:14000, origin:{iata:"CDG",country:"FR"}, destination:null},
+     alt_ft:14000, origin:{iata:"CDG",city:"Paris",country:"FR"}, destination:null},
     {callsign:"DLH4XA", airline:"LUFTHANSA", type:"A21N",
      in_view:false, eta_min:8.0, bearing_deg:240, dist_km:80.0, track_deg:70,
-     alt_ft:24000, origin:{iata:"FRA",country:"DE"}, destination:{iata:"LHR",country:"GB"}},
+     alt_ft:24000, origin:{iata:"FRA",city:"Frankfurt",country:"DE"}, destination:{iata:"LHR",country:"GB"}},
     {callsign:"UAE7T", airline:"EMIRATES", type:"B77W",
      in_view:false, eta_min:9.0, bearing_deg:110, dist_km:100.0, track_deg:298,
-     alt_ft:28000, origin:{iata:"DXB",country:"AE"}, destination:{iata:"LHR",country:"GB"}},
+     alt_ft:28000, origin:{iata:"DXB",city:"Dubai",country:"AE"}, destination:{iata:"LHR",country:"GB"}},
     {callsign:"LOT285", airline:"LOT POLISH", type:"B738",
      in_view:false, eta_min:10.0, bearing_deg:60, dist_km:130.0, track_deg:200,
-     alt_ft:31000, origin:{iata:"WAW",country:"PL"}, destination:{iata:"LHR",country:"GB"}},
+     alt_ft:31000, origin:{iata:"WAW",city:"Warsaw",country:"PL"}, destination:{iata:"LHR",country:"GB"}},
   ]
 };
 
@@ -244,6 +251,21 @@ const CARD=["N","NNE","NE","ENE","E","ESE","SE","SSE","S","SSW","SW","WSW","W","
 const cardinal=d=>CARD[Math.round(d/22.5)%16];
 const iata=p=>p?(p.iata||p.icao||""):"";
 const ctry=p=>p&&p.country?String(p.country).slice(0,2):"";
+
+/* full country name from a 2-letter code, via the browser's locale data */
+let _regions=null; try{ _regions=new Intl.DisplayNames(["en"],{type:"region"}); }catch(e){}
+function countryName(code){
+  if(!code) return "";
+  code=String(code).toUpperCase().slice(0,2);
+  try{ return (_regions && _regions.of(code)) || code; }catch(e){ return code; }
+}
+/* "City, Country" for the origin, in full (falls back gracefully) */
+function originFull(f){
+  const o=(f&&f.origin)||{};
+  const city=o.city?String(o.city):"";
+  const country=countryName(o.country);
+  return city && country ? city+", "+country : (city||country||"");
+}
 /* list ETA (split-flap): NOW / ~5M */
 const etaText=f=> (f.in_view || !f.eta_min || f.eta_min<=0) ? "NOW" : ("~"+Math.round(f.eta_min)+"M");
 /* map ETA (small label): NOW / ~5m */
@@ -266,19 +288,22 @@ function colWidth(n){
 }
 
 function rowHtml(f){
-  // per-column string values, priority order: airline / from / country / to / type / eta
+  // per-column tile values (AIRLINE is handled specially as two text lines)
   const vals = f ? [
-    (f.airline||f.type_desc||"").toUpperCase(),  // AIRLINE (plain text)
-    iata(f.origin),                              // FROM  origin IATA
-    ctry(f.origin),                              // CTY   origin country
-    iata(f.destination),                         // TO    destination IATA
-    f.type||"",                                  // TYPE  aircraft type
-    etaText(f),                                  // ETA
+    null,                        // AIRLINE (name + city/country, below)
+    iata(f.origin),              // FROM  origin IATA
+    iata(f.destination),         // TO    destination IATA
+    f.type||"",                  // TYPE  aircraft type
+    etaText(f),                  // ETA
   ] : COLS.map(()=>"");
   return `<div class="row">`+COLS.map(([label,n,kind,dim],i)=>{
     if(kind==="text"){
-      const t=esc(fit(vals[i], n*3).trim());   // fit width scales with tile count
-      return `<div class="grp airline" style="width:${colWidth(n)}">${t}</div>`;
+      if(!f) return `<div class="grp airline" style="width:${colWidth(n)}"></div>`;
+      const nm=esc(fit((f.airline||f.type_desc||"").toUpperCase(), n*3).trim());
+      const sub=esc(originFull(f));
+      return `<div class="grp airline" style="width:${colWidth(n)}">`+
+             `<div class="nm">${nm}</div>`+(sub?`<div class="sub">${sub}</div>`:"")+
+             `</div>`;
     }
     return `<div class="grp">${tiles(vals[i],n,dim)}</div>`;
   }).join("")+`</div>`;
