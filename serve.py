@@ -487,6 +487,28 @@ if DEVICE_SALT == "window-flights":
           "server to the internet.", file=sys.stderr, flush=True)
 
 
+def _norm_mac(mac):
+    """Normalise a MAC to bare uppercase hex so AA:BB.., aa-bb.., etc. compare
+    equal."""
+    return re.sub(r"[^0-9A-Fa-f]", "", mac or "").upper()
+
+
+# Optional device allowlist. Empty (the default) means any device may pair —
+# convenient for the very first pairing. Set ALLOWED_MACS to a comma-separated
+# list of your device MAC(s) to refuse every other device outright.
+ALLOWED_MACS = {_norm_mac(m) for m in os.environ.get("ALLOWED_MACS", "").split(",")
+                if m.strip()}
+
+if not ALLOWED_MACS:
+    print("[byos] NOTE: ALLOWED_MACS is empty — any device that finds this "
+          "server can pair. Set it to your device MAC to lock the board down.",
+          file=sys.stderr, flush=True)
+
+
+def _mac_allowed(mac):
+    return (not ALLOWED_MACS) or (_norm_mac(mac) in ALLOWED_MACS)
+
+
 def _device_key(mac):
     """Per-device api_key = HMAC(DEVICE_SALT, mac). Deterministic, so a
     correct device always presents the same Access-Token and we never need to
@@ -577,6 +599,11 @@ class Handler(SimpleHTTPRequestHandler):
             return self.handle_api(parsed)
         if parsed.path in ("/api/setup", "/api/setup/"):
             mac = self.headers.get("ID", "unknown")
+            if not _mac_allowed(mac):
+                print(f"[byos] setup REFUSED for unlisted device {mac}", flush=True)
+                return self._json(200, {"status": 404, "api_key": None,
+                                        "friendly_id": None, "image_url": None,
+                                        "message": "device not authorised"})
             print(f"[byos] setup from device {mac}", flush=True)
             return self._json(200, byos_setup(mac, self._public_base()))
         if parsed.path in ("/api/display", "/api/display/"):
@@ -584,8 +611,8 @@ class Handler(SimpleHTTPRequestHandler):
             token = self.headers.get("Access-Token") or self.headers.get("access-token")
             batt = self.headers.get("BATTERY_VOLTAGE") or self.headers.get("Battery-Voltage")
             rssi = self.headers.get("RSSI") or self.headers.get("Rssi")
-            if not hmac.compare_digest(token or "", _device_key(mac)):
-                print(f"[byos] display DENIED for {mac} (bad/missing token)", flush=True)
+            if not _mac_allowed(mac) or not hmac.compare_digest(token or "", _device_key(mac)):
+                print(f"[byos] display DENIED for {mac} (unlisted or bad token)", flush=True)
                 return self._json(200, byos_reset("unrecognised device"))
             print(f"[byos] display poll from {mac} batt={batt} rssi={rssi}", flush=True)
             return self._json(200, byos_display(self._public_base()))
