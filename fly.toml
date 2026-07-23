@@ -8,7 +8,7 @@
 # TRMNL at that URL (WiFi setup > Advanced > Custom Server, no trailing slash).
 #
 # Set `app` below to the name you chose (must be globally unique on Fly).
-app = "flight-trmnl"
+app = "flight-trmnl-jerome"
 primary_region = "lhr"   # London; pick your nearest https://fly.io/docs/reference/regions/
 
 [build]
