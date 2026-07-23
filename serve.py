@@ -507,6 +507,81 @@ def _entry_eta_s(cfg, lat, lon, alt_ft, gs_kt, track_deg, vs_fpm, half):
     return None
 
 
+# How much of the surroundings the map shows (radius in km from home). Much
+# tighter than the prediction range so the Thames + local landmarks read; far
+# inbound traffic is clamped to the map edge by the board.
+MAP_RANGE_KM = float(os.environ.get("MAP_RANGE_KM", "20"))
+
+# River Thames through central/east London, west→east, simplified (lat, lon).
+# Plotted relative to home so the map shows the real course past the window.
+_THAMES = [
+    (51.4850, -0.1300), (51.4890, -0.1240), (51.4930, -0.1215),
+    (51.4985, -0.1240), (51.5015, -0.1215), (51.5045, -0.1175),
+    (51.5065, -0.1120), (51.5078, -0.1045), (51.5092, -0.0975),
+    (51.5085, -0.0895), (51.5062, -0.0815), (51.5050, -0.0755),
+    (51.5058, -0.0675), (51.5065, -0.0600), (51.5090, -0.0520),
+    (51.5090, -0.0450), (51.5060, -0.0360), (51.5008, -0.0305),
+    (51.4930, -0.0255), (51.4855, -0.0095), (51.4885,  0.0005),
+    (51.4960, -0.0035), (51.5035,  0.0055), (51.5065,  0.0155),
+    (51.5040,  0.0305), (51.5010,  0.0405),
+]
+
+# Notable landmarks south of the flat (lat, lon, short label).
+_LANDMARKS = [
+    (51.5045, -0.0865, "SHARD"),
+    (51.5055, -0.0754, "TOWER BR"),
+    (51.5138, -0.0984, "ST PAUL'S"),
+    (51.5054, -0.0235, "CANARY WHF"),
+    (51.5030,  0.0032, "THE O2"),
+    (51.5048,  0.0495, "CITY ARPT"),
+    (51.4769, -0.0005, "GREENWICH"),
+]
+
+
+def _rel_km(lat, lon, home_lat, home_lon):
+    """East/north offset in km from home (equirectangular — fine at city scale)."""
+    east = math.radians(lon - home_lon) * math.cos(math.radians(home_lat)) * EARTH_R_KM
+    north = math.radians(lat - home_lat) * EARTH_R_KM
+    return round(east, 3), round(north, 3)
+
+
+def build_geo(home_lat, home_lon):
+    """Thames + landmarks as east/north km offsets from home for the map."""
+    return {
+        "thames": [_rel_km(la, lo, home_lat, home_lon) for la, lo in _THAMES],
+        "landmarks": [
+            {"name": name, "e": (en := _rel_km(la, lo, home_lat, home_lon))[0], "n": en[1]}
+            for la, lo, name in _LANDMARKS
+        ],
+    }
+
+
+# Latest device telemetry, captured from /api/display request headers and fed
+# into the next board render (one poll cycle of lag, which is fine for battery).
+LAST_DEVICE = {"voltage": None, "percent": None, "rssi": None}
+
+
+def battery_percent(v):
+    """Rough LiPo state-of-charge from voltage (empty ~3.4 V, full ~4.15 V)."""
+    if v is None:
+        return None
+    return max(0, min(100, round((v - 3.4) / (4.15 - 3.4) * 100)))
+
+
+def record_device_state(batt, rssi):
+    try:
+        v = float(batt) if batt else None
+    except (TypeError, ValueError):
+        v = None
+    if v is not None:
+        LAST_DEVICE["voltage"] = round(v, 2)
+        LAST_DEVICE["percent"] = battery_percent(v)
+    try:
+        LAST_DEVICE["rssi"] = int(float(rssi)) if rssi else LAST_DEVICE["rssi"]
+    except (TypeError, ValueError):
+        pass
+
+
 def board_data(cfg):
     """In-view + soon-to-be-in-view aircraft for the display, each tagged with
     eta_min (0 = currently in view). Also returns the view-cone config so the
@@ -548,11 +623,13 @@ def board_data(cfg):
             "track_deg": track,
             "alt_ft": alt_ft,
             "gs_kt": gs,
+            "lat": lat,
+            "lon": lon,
         })
     # in-view first, then soonest arrivals; keep the board readable
     out.sort(key=lambda f: (not f["in_view"], f["eta_min"], f["dist_km"]))
     out = out[:MAX_BOARD_FLIGHTS]
-    routes = lookup_routes([(f["callsign"], f["bearing_deg"], f["dist_km"]) for f in out])
+    routes = lookup_routes([(f["callsign"], f["lat"], f["lon"]) for f in out])
     for f in out:
         r = routes.get(f["callsign"])
         f["origin"] = r[0] if r else None
@@ -563,7 +640,10 @@ def board_data(cfg):
             "fov": cfg["fov"],
             "range_km": cfg["range_km"],
             "predict_range_km": PREDICT_RANGE_KM,
+            "map_range_km": MAP_RANGE_KM,
             "horizon_min": PREDICT_HORIZON_S / 60.0,
+            "geo": build_geo(cfg["lat"], cfg["lon"]),
+            "battery": dict(LAST_DEVICE),
         },
         "flights": out,
     }
@@ -727,6 +807,7 @@ class Handler(SimpleHTTPRequestHandler):
             if not _mac_allowed(mac) or not hmac.compare_digest(token or "", _device_key(mac)):
                 print(f"[byos] display DENIED for {mac} (unlisted or bad token)", flush=True)
                 return self._json(200, byos_reset("unrecognised device"))
+            record_device_state(batt, rssi)
             print(f"[byos] display poll from {mac} batt={batt} rssi={rssi}", flush=True)
             return self._json(200, byos_display(self._public_base()))
         if parsed.path == SCREEN_PATH:

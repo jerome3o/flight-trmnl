@@ -74,6 +74,10 @@
   .brand{font-size:var(--brand-fs);font-weight:600;letter-spacing:.12em;color:var(--w)}
   .brand small{color:var(--l);font-weight:500;letter-spacing:.18em;font-size:calc(var(--brand-fs)*.55);margin-left:.5em}
   .clock{font-size:var(--brand-fs);font-weight:600;letter-spacing:.08em;color:var(--w)}
+  .hdr-right{display:flex;align-items:center;gap:.7em}
+  .batt{display:flex;align-items:center;gap:.32em;font-size:calc(var(--brand-fs)*.62);font-weight:600;color:var(--l);letter-spacing:.04em}
+  .batt-ic{width:2em;height:.92em;display:block}
+  .batt-v{font-size:.82em;font-weight:500}
 
   /* ---- column labels ---- */
   .cols{display:flex;gap:var(--col-gap);margin-bottom:calc(var(--pad-y)*.5)}
@@ -104,6 +108,14 @@
   .tile.blank{color:var(--d)}          /* empty flap */
   .tile.dim{color:var(--l)}            /* secondary info flaps */
 
+  /* airline: de-emphasised plain text, no split-flap tiles */
+  .airline{
+    display:flex;align-items:center;
+    font-size:var(--airline-fs);font-weight:500;line-height:1.05;
+    letter-spacing:.02em;color:var(--l);text-transform:uppercase;
+    overflow:hidden;white-space:nowrap;
+  }
+
   /* ---- footer ---- */
   footer{
     border-top:var(--seam-h) solid var(--d);
@@ -118,7 +130,10 @@
   <div class="right">
     <header>
       <div class="brand">OVERHEAD</div>
-      <div class="clock" id="clock">16:42</div>
+      <div class="hdr-right">
+        <div class="batt" id="batt"></div>
+        <div class="clock" id="clock">16:42</div>
+      </div>
     </header>
     <div class="cols" id="cols"></div>
     <div id="board"></div>
@@ -129,9 +144,16 @@
   </div>
 
 <script>
-/* Column layout for the split-flap list: [label, width-in-tiles, dim?] */
-const COLS=[["AIRLINE",12,false],["FROM",4,false],["TYPE",4,true],
-            ["FLIGHT",7,true],["FL",3,false],["ETA",4,false]];
+/* Column layout for the split-flap list. Each: [label, width-in-tiles, kind, dim?]
+   kind "text" = de-emphasised plain airline text; "tile" = split-flap tiles.
+   Flight-number (callsign) and flight-level columns are gone on purpose —
+   the user only cares about the route, not the flight id. */
+const COLS=[["AIRLINE",9,"text",false],
+            ["FROM",3,"tile",false],
+            ["CTY", 2,"tile",true ],
+            ["TO",  3,"tile",false],
+            ["TYPE",4,"tile",true ],
+            ["ETA", 4,"tile",false]];
 let ROWS=5;   /* recomputed from the viewport by layout() */
 
 /* Size the split-flap board to fit the RIGHT panel (55% of the viewport):
@@ -160,6 +182,7 @@ function layout(){
   set.setProperty("--brand-fs", Math.round(tileH*0.5)+"px");
   set.setProperty("--label-fs", labelFs+"px");
   set.setProperty("--tile-fs", Math.round(tileH*0.58)+"px");
+  set.setProperty("--airline-fs", Math.max(10, Math.round(tileH*0.30))+"px");
   set.setProperty("--seam-h", Math.max(1, Math.round(tileH*0.022))+"px");
   // how many rows fit once header / column labels / footer are accounted for
   const chrome = padY*5 + tileH + labelFs*4.2;
@@ -167,41 +190,64 @@ function layout(){
   ROWS = Math.max(1, Math.min(24, Math.floor((H - chrome) / rowStride)));
 }
 
-/* Fallback sample — same shape as /api/board (config + flights[]) */
+/* Fallback sample — same shape as /api/board (config + geo + flights[]) so
+   the file previews standalone. e = km EAST of home, n = km NORTH (neg = south);
+   the Thames + landmarks sit south of the flat, matching the real backend. */
 const SAMPLE={
-  config:{bearing:168.0, fov:145.0, range_km:5.0, predict_range_km:180.0, horizon_min:10.0},
+  config:{bearing:168.0, fov:145.0, range_km:25.0, predict_range_km:180.0,
+    map_range_km:20.0, horizon_min:10.0,
+    battery:{voltage:3.98, percent:77, rssi:-61},
+    geo:{
+      thames:[[-4.56,-3.58],[-3.98,-2.70],[-3.30,-2.05],[-2.60,-1.75],
+        [-1.95,-1.30],[-1.30,-1.45],[-0.80,-1.30],[-0.30,-1.55],[0.30,-1.95],
+        [1.10,-2.20],[2.10,-1.85],[2.80,-1.32],[3.60,-1.55],[4.65,-1.58],
+        [5.50,-1.95],[6.40,-1.60]],
+      landmarks:[
+        {name:"SHARD",     e:-1.55, n:-1.42},
+        {name:"TOWER BR",  e:-0.79, n:-1.31},
+        {name:"ST PAUL'S", e:-2.38, n:-0.38},
+        {name:"CANARY WHF",e: 2.81, n:-1.32},
+        {name:"THE O2",    e: 4.65, n:-1.58},
+        {name:"GREENWICH", e: 4.40, n:-4.49}
+      ]
+    }
+  },
   flights:[
-    {callsign:"BAW23", airline:"BRITISH AIRWAYS", type:"A21N", type_desc:"Airbus A321neo",
-     in_view:true, eta_min:0, bearing_deg:129.0, dist_km:3.4, track_deg:268,
-     alt_ft:5900, gs_kt:240, origin:{iata:"AMS"}, destination:{iata:"LHR"}},
-    {callsign:"CFE21B", airline:"BA CITYFLYER", type:"E190", type_desc:"Embraer 190",
-     in_view:true, eta_min:0, bearing_deg:185.0, dist_km:4.1, track_deg:310,
-     alt_ft:5200, gs_kt:210, origin:{iata:"DUB"}, destination:{iata:"LCY"}},
-    {callsign:"EZY31KG", airline:"EASYJET", type:"A320", type_desc:"Airbus A320",
-     in_view:false, eta_min:2.0, bearing_deg:214, dist_km:16.4, track_deg:40,
-     alt_ft:8400, gs_kt:300, origin:{iata:"CDG"}, destination:null},
-    {callsign:"VIR5F", airline:"VIRGIN ATLANTIC", type:"A35K", type_desc:"Airbus A350-1000",
-     in_view:false, eta_min:3.0, bearing_deg:132, dist_km:28.0, track_deg:300,
-     alt_ft:12000, gs_kt:360, origin:{iata:"JFK"}, destination:{iata:"LHR"}},
-    {callsign:"KLM43W", airline:"KLM", type:"B738", type_desc:"Boeing 737-800",
-     in_view:false, eta_min:5.0, bearing_deg:258, dist_km:47.5, track_deg:95,
-     alt_ft:16000, gs_kt:390, origin:{iata:"AMS"}, destination:{iata:"LHR"}},
-    {callsign:"RYR8ML", airline:"RYANAIR", type:"B38M", type_desc:"Boeing 737 MAX 8",
-     in_view:false, eta_min:6.0, bearing_deg:296, dist_km:63.2, track_deg:118,
-     alt_ft:19000, gs_kt:420, origin:{iata:"DUB"}, destination:null},
-    {callsign:"AFR27TG", airline:"AIR FRANCE", type:"A319", type_desc:"Airbus A319",
-     in_view:false, eta_min:8.0, bearing_deg:168, dist_km:92.0, track_deg:348,
-     alt_ft:24000, gs_kt:440, origin:{iata:"CDG"}, destination:{iata:"LHR"}},
-    {callsign:"DLH4XA", airline:"LUFTHANSA", type:"A21N", type_desc:"Airbus A321neo",
-     in_view:false, eta_min:10.0, bearing_deg:240, dist_km:124.0, track_deg:70,
-     alt_ft:31000, gs_kt:460, origin:{iata:"FRA"}, destination:{iata:"LHR"}},
+    {callsign:"BAW23", airline:"BRITISH AIRWAYS", type:"A21N",
+     in_view:true, eta_min:0, bearing_deg:168.0, dist_km:5.2, track_deg:270,
+     alt_ft:5900, origin:{iata:"CDG",country:"FR"}, destination:{iata:"LHR",country:"GB"}},
+    {callsign:"CFE21B", airline:"BA CITYFLYER", type:"E190",
+     in_view:true, eta_min:0, bearing_deg:200.0, dist_km:8.4, track_deg:305,
+     alt_ft:5200, origin:{iata:"DUB",country:"IE"}, destination:{iata:"LCY",country:"GB"}},
+    {callsign:"KLM43W", airline:"KLM", type:"B738",
+     in_view:false, eta_min:3.0, bearing_deg:150, dist_km:17.5, track_deg:322,
+     alt_ft:9000, origin:{iata:"AMS",country:"NL"}, destination:{iata:"LHR",country:"GB"}},
+    {callsign:"VIR5F", airline:"VIRGIN ATLANTIC", type:"A35K",
+     in_view:false, eta_min:5.0, bearing_deg:132, dist_km:42.0, track_deg:300,
+     alt_ft:12000, origin:{iata:"JFK",country:"US"}, destination:{iata:"LHR",country:"GB"}},
+    {callsign:"EZY31KG", airline:"EASYJET", type:"A320",
+     in_view:false, eta_min:6.0, bearing_deg:212, dist_km:55.0, track_deg:40,
+     alt_ft:14000, origin:{iata:"CDG",country:"FR"}, destination:null},
+    {callsign:"DLH4XA", airline:"LUFTHANSA", type:"A21N",
+     in_view:false, eta_min:8.0, bearing_deg:240, dist_km:80.0, track_deg:70,
+     alt_ft:24000, origin:{iata:"FRA",country:"DE"}, destination:{iata:"LHR",country:"GB"}},
+    {callsign:"UAE7T", airline:"EMIRATES", type:"B77W",
+     in_view:false, eta_min:9.0, bearing_deg:110, dist_km:100.0, track_deg:298,
+     alt_ft:28000, origin:{iata:"DXB",country:"AE"}, destination:{iata:"LHR",country:"GB"}},
+    {callsign:"LOT285", airline:"LOT POLISH", type:"B738",
+     in_view:false, eta_min:10.0, bearing_deg:60, dist_km:130.0, track_deg:200,
+     alt_ft:31000, origin:{iata:"WAW",country:"PL"}, destination:{iata:"LHR",country:"GB"}},
   ]
 };
 
 const CARD=["N","NNE","NE","ENE","E","ESE","SE","SSE","S","SSW","SW","WSW","W","WNW","NW","NNW"];
 const cardinal=d=>CARD[Math.round(d/22.5)%16];
 const iata=p=>p?(p.iata||p.icao||""):"";
+const ctry=p=>p&&p.country?String(p.country).slice(0,2):"";
+/* list ETA (split-flap): NOW / ~5M */
 const etaText=f=> (f.in_view || !f.eta_min || f.eta_min<=0) ? "NOW" : ("~"+Math.round(f.eta_min)+"M");
+/* map ETA (small label): NOW / ~5m */
+const etaMap=f=> (f.in_view || !f.eta_min || f.eta_min<=0) ? "NOW" : ("~"+Math.round(f.eta_min)+"m");
 
 function fit(text,n){
   text=(text||"").toUpperCase().replace(/[^A-Z0-9 °\-~]/g," ");
@@ -214,142 +260,210 @@ function tiles(text,n,dim){
   ).join("");
 }
 
+/* CSS width of a column group that is `n` tiles wide */
+function colWidth(n){
+  return `calc(${n} * (var(--tile-w) + var(--tile-gap)) - var(--tile-gap))`;
+}
+
 function rowHtml(f){
-  const fl=f&&f.alt_ft!=null?String(Math.round(f.alt_ft/100)).padStart(3,"0"):"";
-  const cells = f ? [
-    fit(f.airline||f.type_desc||f.callsign,12),
-    fit(iata(f.origin),4),
-    fit(f.type||"",4),
-    fit(f.callsign||"",7),
-    fit(fl,3),
-    fit(etaText(f),4),
-  ] : COLS.map(c=>"".padEnd(c[1]," "));
-  return `<div class="row">`+cells.map((t,i)=>
-    `<div class="grp">${tiles(t,COLS[i][1],COLS[i][2])}</div>`).join("")+`</div>`;
+  // per-column string values, priority order: airline / from / country / to / type / eta
+  const vals = f ? [
+    (f.airline||f.type_desc||"").toUpperCase(),  // AIRLINE (plain text)
+    iata(f.origin),                              // FROM  origin IATA
+    ctry(f.origin),                              // CTY   origin country
+    iata(f.destination),                         // TO    destination IATA
+    f.type||"",                                  // TYPE  aircraft type
+    etaText(f),                                  // ETA
+  ] : COLS.map(()=>"");
+  return `<div class="row">`+COLS.map(([label,n,kind,dim],i)=>{
+    if(kind==="text"){
+      const t=esc(fit(vals[i], n*3).trim());   // fit width scales with tile count
+      return `<div class="grp airline" style="width:${colWidth(n)}">${t}</div>`;
+    }
+    return `<div class="grp">${tiles(vals[i],n,dim)}</div>`;
+  }).join("")+`</div>`;
 }
 
 /* ---------------- LEFT PANEL: the vector map ---------------- */
 
 const D2R=Math.PI/180;
-// polar → screen: north up. x = cx + r*sin(B), y = cy - r*cos(B)
-function polar(cx,cy,bearing,r){
-  return [cx + r*Math.sin(bearing*D2R), cy - r*Math.cos(bearing*D2R)];
-}
-function niceStep(x){
-  // round a target ring spacing to a friendly km value
-  const steps=[1,2,5,10,20,25,50,100,150,200];
-  for(const s of steps){ if(s>=x) return s; }
-  return steps[steps.length-1];
-}
 function esc(s){return String(s).replace(/&/g,"&amp;").replace(/</g,"&lt;");}
 
+/* Clamp the ray home→(px,py) to an inset rectangle; returns the border point. */
+function rayToRect(hx,hy,px,py,minX,minY,maxX,maxY){
+  const dx=px-hx, dy=py-hy;
+  let t=Infinity;
+  if(dx>1e-6)  t=Math.min(t,(maxX-hx)/dx);
+  if(dx<-1e-6) t=Math.min(t,(minX-hx)/dx);
+  if(dy>1e-6)  t=Math.min(t,(maxY-hy)/dy);
+  if(dy<-1e-6) t=Math.min(t,(minY-hy)/dy);
+  if(!isFinite(t)) t=0;
+  return [hx+dx*t, hy+dy*t];
+}
+
+/* ZOOMED forward-facing local map. Home sits near the TOP (north up, so
+   everything north of the flat is cropped); the window faces SSE, so the
+   view cone, the Thames and the landmarks all fall into the lower part. */
 function buildMap(cfg, flights){
   const svg=document.getElementById("svg");
   const box=svg.getBoundingClientRect();
   const W=Math.max(50,box.width), H=Math.max(50,box.height);
   svg.setAttribute("viewBox",`0 0 ${W} ${H}`);
-  const cx=W/2, cy=H/2;
-  const maxR=Math.min(W,H)/2 * 0.82;      // leave room for edge labels
-  const fs=Math.max(9, Math.min(W,H)*0.028);
-  const strokeW=Math.max(1, Math.min(W,H)*0.0022);
+  const fs=Math.max(9, Math.min(W,H)*0.026);
+  const strokeW=Math.max(1, Math.min(W,H)*0.0020);
 
-  const range=cfg.range_km||5;
-  const predict=cfg.predict_range_km||180;
   const bearing=cfg.bearing||0, fov=cfg.fov||120;
+  const range=cfg.range_km||25;
+  const mapRange=cfg.map_range_km||20;
+  const geo=cfg.geo||{};
 
-  // auto-scale: fit farthest shown flight +10%, clamp to [max(range*2,20), predict]
-  const far=flights.reduce((m,f)=>Math.max(m, f.dist_km||0), 0);
-  const lo=Math.max(range*2, 20), hi=Math.max(lo, predict);
-  let scaleKm=Math.min(hi, Math.max(lo, far*1.1));
-  const kmToR = km => (km/scaleKm)*maxR;
+  // projection: home near top-centre, fixed zoom to map_range_km.
+  const pxPerKm=(H*0.80)/mapRange;
+  const homeX=W/2, homeY=H*0.14;
+  const proj=(e,n)=>[homeX + e*pxPerKm, homeY - n*pxPerKm];
+  // polar (bearing,dist) → (e,n): e=d·sinB, n=d·cosB
+  const projBD=(bd,d)=>proj(d*Math.sin(bd*D2R), d*Math.cos(bd*D2R));
 
   const P=[]; // svg pieces
   const dark="var(--w)", grey="var(--l)", lite="var(--d)", paper="var(--k)";
+  const river="#888888";
 
-  // defs: heading arrowheads (dark for in-view, grey for upcoming)
+  // everything drawn inside the panel is clipped to it
   P.push(`<defs>
+    <clipPath id="pan"><rect x="0" y="0" width="${W}" height="${H}"/></clipPath>
     <marker id="ah" markerWidth="7" markerHeight="7" refX="5.5" refY="3" orient="auto">
       <path d="M0,0 L6,3 L0,6 Z" fill="${dark}"/></marker>
     <marker id="ahg" markerWidth="7" markerHeight="7" refX="5.5" refY="3" orient="auto">
       <path d="M0,0 L6,3 L0,6 Z" fill="${grey}"/></marker>
   </defs>`);
+  P.push(`<g clip-path="url(#pan)">`);
 
-  // view cone wedge (the "what you can see" zone), radius = range scaled
-  const coneR=Math.max(kmToR(range), maxR*0.10);   // keep visible even when tiny
+  // ---- view cone wedge (what the window sees), radius = range_km scaled ----
+  const coneR=range*pxPerKm;
   const a0=bearing-fov/2, a1=bearing+fov/2;
-  const [x0,y0]=polar(cx,cy,a0,coneR);
-  const [x1,y1]=polar(cx,cy,a1,coneR);
-  const largeArc = fov>180?1:0;
-  P.push(`<path d="M${cx.toFixed(1)},${cy.toFixed(1)} L${x0.toFixed(1)},${y0.toFixed(1)} `+
+  const [x0,y0]=projBD(a0,range), [x1,y1]=projBD(a1,range);
+  const largeArc=fov>180?1:0;
+  P.push(`<path d="M${homeX.toFixed(1)},${homeY.toFixed(1)} L${x0.toFixed(1)},${y0.toFixed(1)} `+
          `A${coneR.toFixed(1)},${coneR.toFixed(1)} 0 ${largeArc} 1 ${x1.toFixed(1)},${y1.toFixed(1)} Z" `+
-         `fill="${lite}" fill-opacity="0.5" stroke="${grey}" stroke-width="${strokeW}" stroke-opacity="0.8"/>`);
-  // cone centre-line (viewing bearing) out to the cone edge
-  const [bx,by]=polar(cx,cy,bearing,coneR);
-  P.push(`<line x1="${cx}" y1="${cy}" x2="${bx.toFixed(1)}" y2="${by.toFixed(1)}" stroke="${grey}" stroke-width="${strokeW}" stroke-dasharray="${(fs*0.35).toFixed(1)} ${(fs*0.35).toFixed(1)}"/>`);
+         `fill="${lite}" fill-opacity="0.28" stroke="${grey}" stroke-width="${strokeW}" stroke-opacity="0.6"/>`);
+  // dashed centre line along the viewing bearing
+  const [bx,by]=projBD(bearing,range);
+  P.push(`<line x1="${homeX}" y1="${homeY}" x2="${bx.toFixed(1)}" y2="${by.toFixed(1)}" stroke="${grey}" `+
+         `stroke-width="${strokeW}" stroke-dasharray="${(fs*0.4).toFixed(1)} ${(fs*0.4).toFixed(1)}"/>`);
 
-  // range rings at round km values
-  const step=niceStep(scaleKm/3);
-  for(let km=step; kmToR(km)<=maxR+0.5; km+=step){
-    const rr=kmToR(km);
-    P.push(`<circle cx="${cx}" cy="${cy}" r="${rr.toFixed(1)}" fill="none" stroke="${lite}" stroke-width="${strokeW}"/>`);
-    // label just above the ring on the north axis
-    P.push(`<text x="${(cx+fs*0.3).toFixed(1)}" y="${(cy-rr+fs*0.9).toFixed(1)}" font-family="Oswald,sans-serif" font-size="${(fs*0.72).toFixed(1)}" fill="${grey}">${km}km</text>`);
+  // ---- faint distance arcs (centred on home) with tiny km labels ----
+  for(const km of [5,10,15,20]){
+    if(km>mapRange) break;
+    const rr=km*pxPerKm;
+    P.push(`<circle cx="${homeX}" cy="${homeY}" r="${rr.toFixed(1)}" fill="none" stroke="${lite}" `+
+           `stroke-width="${strokeW}" stroke-opacity="0.9"/>`);
+    // labels sit west of the centre bearing line (which drifts east) so
+    // southbound traffic rarely lands on them
+    P.push(`<text x="${(homeX-fs*2.4).toFixed(1)}" y="${(homeY+rr-fs*0.35).toFixed(1)}" `+
+           `text-anchor="end" font-family="Oswald,sans-serif" font-size="${(fs*0.62).toFixed(1)}" fill="${grey}">${km}km</text>`);
   }
-  // outer boundary
-  P.push(`<circle cx="${cx}" cy="${cy}" r="${maxR.toFixed(1)}" fill="none" stroke="${grey}" stroke-width="${strokeW}"/>`);
 
-  // cardinal ticks + letters (N E S W)
-  const cards=[["N",0],["E",90],["S",180],["W",270]];
-  for(const [lab,ang] of cards){
-    const [tx0,ty0]=polar(cx,cy,ang,maxR);
-    const [tx1,ty1]=polar(cx,cy,ang,maxR-fs*0.7);
-    P.push(`<line x1="${tx0.toFixed(1)}" y1="${ty0.toFixed(1)}" x2="${tx1.toFixed(1)}" y2="${ty1.toFixed(1)}" stroke="${grey}" stroke-width="${strokeW*1.4}"/>`);
-    const [lx,ly]=polar(cx,cy,ang,maxR+fs*0.95);
-    const weight = lab==="N"?"600":"500";
-    P.push(`<text x="${lx.toFixed(1)}" y="${(ly+fs*0.35).toFixed(1)}" text-anchor="middle" font-family="Oswald,sans-serif" font-weight="${weight}" font-size="${(lab==="N"?fs*1.15:fs*0.9).toFixed(1)}" fill="${lab==="N"?dark:grey}">${lab}</text>`);
+  // ---- River Thames polyline ----
+  const th=geo.thames||[];
+  if(th.length>1){
+    const pts=th.map(p=>{const[x,y]=proj(p[0],p[1]);return `${x.toFixed(1)},${y.toFixed(1)}`;}).join(" ");
+    P.push(`<polyline points="${pts}" fill="none" stroke="${river}" stroke-width="${(strokeW*2.6).toFixed(2)}" `+
+           `stroke-linejoin="round" stroke-linecap="round"/>`);
+    // THAMES label on a clear western segment, away from the landmark cluster
+    const mid=th[Math.floor(th.length*0.14)];
+    if(mid){const[mx,my]=proj(mid[0],mid[1]);
+      if(mx>fs&&mx<W-fs*4&&my>0&&my<H)
+        P.push(`<text x="${mx.toFixed(1)}" y="${(my+fs*1.15).toFixed(1)}" font-family="Oswald,sans-serif" `+
+               `font-size="${(fs*0.6).toFixed(1)}" letter-spacing="2" fill="${river}">THAMES</text>`);
+    }
   }
-  // north arrow accent above N
-  const [na_x,na_y]=polar(cx,cy,0,maxR+fs*1.6);
-  P.push(`<path d="M${na_x.toFixed(1)},${(na_y-fs*0.5).toFixed(1)} l${(-fs*0.32).toFixed(1)},${(fs*0.7).toFixed(1)} l${(fs*0.64).toFixed(1)},0 Z" fill="${dark}"/>`);
 
-  // aircraft
-  const markR=Math.max(3, fs*0.42);
-  const arrowLen=fs*1.7;
+  // ---- landmarks: hollow marker + tiny label, skip off-panel ----
+  const lmR=Math.max(2.2, fs*0.24);
+  for(const lm of (geo.landmarks||[])){
+    const [x,y]=proj(lm.e,lm.n);
+    if(x<fs||x>W-fs||y<0||y>H) continue;
+    P.push(`<rect x="${(x-lmR).toFixed(1)}" y="${(y-lmR).toFixed(1)}" width="${(lmR*2).toFixed(1)}" `+
+           `height="${(lmR*2).toFixed(1)}" fill="${paper}" stroke="${grey}" stroke-width="${strokeW}"/>`);
+    // label pushed OUTWARD from home (west markers left, east markers right) so
+    // the dense central cluster (Shard / Tower Br / St Paul's) spreads apart
+    const right = lm.e >= 0;
+    P.push(`<text x="${(x+(right?lmR+3:-lmR-3)).toFixed(1)}" y="${(y+fs*0.32).toFixed(1)}" `+
+           `text-anchor="${right?"start":"end"}" font-family="Oswald,sans-serif" `+
+           `font-size="${(fs*0.56).toFixed(1)}" fill="${grey}">${esc(lm.name)}</text>`);
+  }
+
+  // ---- aircraft ----
+  const markR=Math.max(3, fs*0.40);
+  const arrowLen=fs*1.6;
+  const inset=fs*1.2;
+  const minX=inset, minY=inset, maxX=W-inset, maxY=H-inset;
   for(const f of flights){
     if(f.dist_km==null||f.bearing_deg==null) continue;
-    const rr=Math.min(kmToR(f.dist_km), maxR); // clamp inside boundary
-    const [x,y]=polar(cx,cy,f.bearing_deg,rr);
     const inv=f.in_view;
-    // heading arrow along track_deg
-    if(f.track_deg!=null){
-      const dx=Math.sin(f.track_deg*D2R), dy=-Math.cos(f.track_deg*D2R);
-      const ex=x+dx*arrowLen, ey=y+dy*arrowLen;
-      P.push(`<line x1="${x.toFixed(1)}" y1="${y.toFixed(1)}" x2="${ex.toFixed(1)}" y2="${ey.toFixed(1)}" `+
-             `stroke="${inv?dark:grey}" stroke-width="${(strokeW*1.6).toFixed(2)}" marker-end="url(#${inv?"ah":"ahg"})"/>`);
-    }
-    // mark: in-view filled black, upcoming open grey
-    if(inv){
-      P.push(`<circle cx="${x.toFixed(1)}" cy="${y.toFixed(1)}" r="${markR.toFixed(1)}" fill="${dark}" stroke="${paper}" stroke-width="${strokeW}"/>`);
+    const [ax,ay]=projBD(f.bearing_deg, f.dist_km);
+    const onPanel = ax>=minX && ax<=maxX && ay>=minY && ay<=maxY && f.dist_km<=mapRange;
+    // label: origin IATA + ETA, fall back to type, else nothing
+    const oi=iata(f.origin);
+    const lab = oi ? oi+" "+etaMap(f) : (f.type ? f.type+" "+etaMap(f) : "");
+
+    if(onPanel){
+      // heading arrow along track_deg
+      if(f.track_deg!=null){
+        const dx=Math.sin(f.track_deg*D2R), dy=-Math.cos(f.track_deg*D2R);
+        P.push(`<line x1="${ax.toFixed(1)}" y1="${ay.toFixed(1)}" x2="${(ax+dx*arrowLen).toFixed(1)}" `+
+               `y2="${(ay+dy*arrowLen).toFixed(1)}" stroke="${inv?dark:grey}" `+
+               `stroke-width="${(strokeW*1.6).toFixed(2)}" marker-end="url(#${inv?"ah":"ahg"})"/>`);
+      }
+      if(inv)
+        P.push(`<circle cx="${ax.toFixed(1)}" cy="${ay.toFixed(1)}" r="${markR.toFixed(1)}" fill="${dark}" stroke="${paper}" stroke-width="${strokeW}"/>`);
+      else
+        P.push(`<circle cx="${ax.toFixed(1)}" cy="${ay.toFixed(1)}" r="${(markR*0.92).toFixed(1)}" fill="${paper}" stroke="${grey}" stroke-width="${(strokeW*1.6).toFixed(2)}"/>`);
+      if(lab){
+        const anchor = ax>W-W*0.28?"end":"start";
+        const ox = anchor==="end"?-(markR+3):(markR+3);
+        P.push(`<text x="${(ax+ox).toFixed(1)}" y="${(ay-markR-2).toFixed(1)}" text-anchor="${anchor}" `+
+               `font-family="Oswald,sans-serif" font-weight="${inv?"600":"500"}" `+
+               `font-size="${(fs*0.66).toFixed(1)}" fill="${inv?dark:grey}">${esc(lab)}</text>`);
+      }
     }else{
-      P.push(`<circle cx="${x.toFixed(1)}" cy="${y.toFixed(1)}" r="${(markR*0.9).toFixed(1)}" fill="${paper}" stroke="${grey}" stroke-width="${(strokeW*1.5).toFixed(2)}"/>`);
+      // OUTSIDE the window: clamp to the panel edge along the line from home,
+      // draw a small triangle pointing outward + the same label
+      const [ex,ey]=rayToRect(homeX,homeY,ax,ay,minX,minY,maxX,maxY);
+      const ang=Math.atan2(ay-homeY, ax-homeX);   // outward direction
+      const t=fs*0.6;                              // triangle size
+      const tip=[ex+Math.cos(ang)*t, ey+Math.sin(ang)*t];
+      const bl =[ex+Math.cos(ang+2.5)*t, ey+Math.sin(ang+2.5)*t];
+      const br =[ex+Math.cos(ang-2.5)*t, ey+Math.sin(ang-2.5)*t];
+      P.push(`<path d="M${tip[0].toFixed(1)},${tip[1].toFixed(1)} L${bl[0].toFixed(1)},${bl[1].toFixed(1)} `+
+             `L${br[0].toFixed(1)},${br[1].toFixed(1)} Z" fill="${inv?dark:grey}"/>`);
+      if(lab){
+        // place label on the inboard side of the edge marker
+        const anchor = ex>W-W*0.30?"end":(ex<W*0.30?"start":"middle");
+        const lx = anchor==="end"?ex-t-2:(anchor==="start"?ex+t+2:ex);
+        const ly = ey>H-fs*1.6 ? ey-t-2 : ey+fs*1.0;
+        P.push(`<text x="${lx.toFixed(1)}" y="${ly.toFixed(1)}" text-anchor="${anchor}" `+
+               `font-family="Oswald,sans-serif" font-weight="500" `+
+               `font-size="${(fs*0.62).toFixed(1)}" fill="${grey}">${esc(lab)}</text>`);
+      }
     }
-    // label: callsign + ETA, offset radially outward to reduce overlap
-    const name=(f.callsign||f.airline||"").toUpperCase().slice(0,7);
-    const tag=name+" "+etaText(f);
-    // push the label out along its bearing to at least a floor radius so
-    // central / close aircraft spread onto a ring instead of piling up
-    const labR=Math.max(rr+markR+fs*0.5, maxR*0.17);
-    const [lx,ly]=polar(cx,cy,f.bearing_deg,labR);
-    const anchor = lx<cx-2?"end":(lx>cx+2?"start":"middle");
-    P.push(`<text x="${lx.toFixed(1)}" y="${(ly+fs*0.32).toFixed(1)}" text-anchor="${anchor}" `+
-           `font-family="Oswald,sans-serif" font-weight="${inv?"600":"500"}" font-size="${(fs*0.74).toFixed(1)}" `+
-           `fill="${inv?dark:grey}">${esc(tag)}</text>`);
   }
 
-  // home marker at centre (diamond + dot)
+  // ---- home marker (diamond + dot) near the top ----
   const hs=Math.max(4, fs*0.55);
-  P.push(`<path d="M${cx},${(cy-hs).toFixed(1)} L${(cx+hs).toFixed(1)},${cy} L${cx},${(cy+hs).toFixed(1)} L${(cx-hs).toFixed(1)},${cy} Z" fill="${paper}" stroke="${dark}" stroke-width="${(strokeW*1.6).toFixed(2)}"/>`);
-  P.push(`<circle cx="${cx}" cy="${cy}" r="${(hs*0.34).toFixed(1)}" fill="${dark}"/>`);
+  P.push(`<path d="M${homeX},${(homeY-hs).toFixed(1)} L${(homeX+hs).toFixed(1)},${homeY} `+
+         `L${homeX},${(homeY+hs).toFixed(1)} L${(homeX-hs).toFixed(1)},${homeY} Z" `+
+         `fill="${paper}" stroke="${dark}" stroke-width="${(strokeW*1.8).toFixed(2)}"/>`);
+  P.push(`<circle cx="${homeX}" cy="${homeY}" r="${(hs*0.34).toFixed(1)}" fill="${dark}"/>`);
+
+  P.push(`</g>`); // end clip
+
+  // ---- North indicator, top-left (outside clip so always visible) ----
+  const nx=fs*1.4, ny=fs*1.6;
+  P.push(`<path d="M${nx.toFixed(1)},${(ny-fs*0.7).toFixed(1)} l${(-fs*0.34).toFixed(1)},${(fs*0.8).toFixed(1)} `+
+         `l${(fs*0.68).toFixed(1)},0 Z" fill="${dark}"/>`);
+  P.push(`<text x="${nx.toFixed(1)}" y="${(ny+fs*1.35).toFixed(1)}" text-anchor="middle" `+
+         `font-family="Oswald,sans-serif" font-weight="600" font-size="${(fs*0.9).toFixed(1)}" fill="${dark}">N</text>`);
 
   svg.innerHTML=P.join("");
 }
@@ -378,6 +492,19 @@ function draw(data){
   const now=new Date();
   document.getElementById("clock").textContent=
     String(now.getHours()).padStart(2,"0")+":"+String(now.getMinutes()).padStart(2,"0");
+
+  // device battery (captured from the last /api/display poll, ~1 cycle stale)
+  const b=cfg.battery||{}, be=document.getElementById("batt");
+  if(b.percent!=null){
+    const p=Math.max(0,Math.min(100,Math.round(b.percent))), fill=(18*p/100).toFixed(1);
+    be.innerHTML=
+      `<svg viewBox="0 0 27 12" class="batt-ic">`+
+      `<rect x="0.5" y="1" width="22" height="10" rx="2" fill="none" stroke="currentColor" stroke-width="1"/>`+
+      `<rect x="23" y="4" width="2.4" height="4" rx="0.8" fill="currentColor"/>`+
+      `<rect x="2" y="2.5" width="${fill}" height="7" rx="0.7" fill="currentColor"/></svg>`+
+      `<span>${p}%</span>`+
+      (b.voltage!=null?`<span class="batt-v">${b.voltage.toFixed(2)}V</span>`:"");
+  } else { be.innerHTML=""; }
 
   buildMap(cfg, flights);
 }
