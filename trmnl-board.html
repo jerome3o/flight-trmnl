@@ -55,7 +55,24 @@
     padding:var(--pad-y) calc(var(--pad-x)*.6) var(--pad-y) var(--pad-x);
     display:flex;flex-direction:column;
   }
-  #svg{flex:1;width:100%;height:100%;display:block}
+  #svg{flex:1;width:100%;min-height:0;display:block}
+
+  /* ---- diagnostics console carved out of the map's lower strip ---- */
+  .debug{
+    flex:0 0 var(--dbg-h,120px);
+    border-top:calc(var(--seam-h)*2) solid var(--l);
+    margin-top:calc(var(--pad-y)*.4);
+    padding-top:calc(var(--pad-y)*.55);
+    font-family:ui-monospace,"SF Mono",Menlo,Consolas,monospace;
+    font-size:var(--dbg-fs,13px);
+    line-height:1.5;
+    letter-spacing:.01em;
+    color:var(--l);
+    white-space:pre;
+    overflow:hidden;
+  }
+  .debug .bar{color:var(--w)}
+  .debug .emg{color:var(--w);font-weight:700}
 
   /* ---- RIGHT: the split-flap panel ---- */
   .right{
@@ -124,6 +141,30 @@
     white-space:nowrap;overflow:hidden;text-overflow:ellipsis;
   }
 
+  /* ---- vertical-trend glyph (climb/descent) on the airline sub-line ---- */
+  .trend{
+    display:inline-block;font-weight:600;color:var(--l);
+    margin-right:.28em;font-size:.95em;line-height:1;
+  }
+  .trend.lvl{color:var(--d)}       /* level = dim dash */
+  .trend.up,.trend.dn{color:var(--w)}
+
+  /* ---- emergency squawk: bold, unmistakable, greyscale only ---- */
+  .row.emerg{outline:calc(var(--seam-h)*2) solid var(--w);outline-offset:2px}
+  .row.emerg .tile{border-color:var(--w);font-weight:700;color:var(--w)}
+  .emerg-badge{
+    display:inline-block;background:var(--w);color:var(--k);
+    font-weight:700;letter-spacing:.06em;padding:0 .4em;
+    white-space:nowrap;text-transform:uppercase;
+  }
+  #emerg-banner{
+    display:none;background:var(--w);color:var(--k);
+    font-weight:600;letter-spacing:.14em;text-transform:uppercase;
+    text-align:center;padding:calc(var(--pad-y)*.4) 0;
+    margin-bottom:calc(var(--pad-y)*.5);
+    font-size:calc(var(--brand-fs)*.6);
+  }
+
   /* ---- footer ---- */
   footer{
     border-top:var(--seam-h) solid var(--d);
@@ -134,7 +175,10 @@
 </style>
 </head>
 <body>
-  <div class="left"><svg id="svg" preserveAspectRatio="xMidYMid meet"></svg></div>
+  <div class="left">
+    <svg id="svg" preserveAspectRatio="xMidYMid meet"></svg>
+    <div class="debug" id="debug"></div>
+  </div>
   <div class="right">
     <header>
       <div class="brand">OVERHEAD</div>
@@ -143,6 +187,7 @@
         <div class="clock" id="clock">16:42</div>
       </div>
     </header>
+    <div id="emerg-banner"></div>
     <div class="cols" id="cols"></div>
     <div id="board"></div>
     <footer>
@@ -191,6 +236,10 @@ function layout(){
   set.setProperty("--tile-fs", Math.round(tileH*0.58)+"px");
   set.setProperty("--airline-fs", Math.max(10, Math.round(tileH*0.30))+"px");
   set.setProperty("--seam-h", Math.max(1, Math.round(tileH*0.022))+"px");
+  // diagnostics strip: carve ~14% off the bottom of the map panel
+  const leftW = W*0.45;
+  set.setProperty("--dbg-h",  Math.round(H*0.14)+"px");
+  set.setProperty("--dbg-fs", Math.max(9, Math.min(22, Math.round(leftW*0.024)))+"px");
   // how many rows fit once header / column labels / footer are accounted for
   const chrome = padY*5 + tileH + labelFs*4.2;
   const rowStride = tileH*1.22;
@@ -204,6 +253,9 @@ const SAMPLE={
   config:{bearing:168.0, fov:145.0, range_km:25.0, predict_range_km:180.0,
     map_range_km:20.0, horizon_min:10.0,
     battery:{voltage:3.98, percent:77, rssi:-61},
+    debug:{source:"ADSB+FR24", n_scan:318, n_board:6, n_enriched:6,
+      fetched_at:Date.now()/1000-4, error:null, fr24:true,
+      credits_used:120, credits_est:48, credits_cap:29000},
     geo:{
       thames:[[-4.56,-3.58],[-3.98,-2.70],[-3.30,-2.05],[-2.60,-1.75],
         [-1.95,-1.30],[-1.30,-1.45],[-0.80,-1.30],[-0.30,-1.55],[0.30,-1.95],
@@ -222,16 +274,20 @@ const SAMPLE={
   flights:[
     {callsign:"BAW23", airline:"BRITISH AIRWAYS", type:"A21N",
      in_view:true, eta_min:0, bearing_deg:168.0, dist_km:5.2, track_deg:270,
-     alt_ft:5900, origin:{iata:"CDG",city:"Paris",country:"FR"}, destination:{iata:"LHR",country:"GB"}},
+     alt_ft:5900, vs_fpm:-820, squawk:"7700", eta:"2026-07-24T16:47:00Z",
+     origin:{iata:"CDG",city:"Paris",country:"FR"}, destination:{iata:"LHR",country:"GB"}},
     {callsign:"CFE21B", airline:"BA CITYFLYER", type:"E190",
      in_view:true, eta_min:0, bearing_deg:200.0, dist_km:8.4, track_deg:305,
-     alt_ft:5200, origin:{iata:"DUB",city:"Dublin",country:"IE"}, destination:{iata:"LCY",country:"GB"}},
+     alt_ft:5200, vs_fpm:1450, squawk:"6142", eta:"2026-07-24T16:49:00Z",
+     origin:{iata:"DUB",city:"Dublin",country:"IE"}, destination:{iata:"LCY",country:"GB"}},
     {callsign:"KLM43W", airline:"KLM", type:"B738",
      in_view:false, eta_min:3.0, bearing_deg:150, dist_km:17.5, track_deg:322,
-     alt_ft:9000, origin:{iata:"AMS",city:"Amsterdam",country:"NL"}, destination:{iata:"LHR",country:"GB"}},
+     alt_ft:9000, vs_fpm:120, squawk:"2000", eta:"2026-07-24T16:52:00Z",
+     origin:{iata:"AMS",city:"Amsterdam",country:"NL"}, destination:{iata:"LHR",country:"GB"}},
     {callsign:"VIR5F", airline:"VIRGIN ATLANTIC", type:"A35K",
      in_view:false, eta_min:5.0, bearing_deg:132, dist_km:42.0, track_deg:300,
-     alt_ft:12000, origin:{iata:"JFK",city:"New York",country:"US"}, destination:{iata:"LHR",country:"GB"}},
+     alt_ft:12000, vs_fpm:2200, squawk:null, eta:"2026-07-24T16:54:00Z",
+     origin:{iata:"JFK",city:"New York",country:"US"}, destination:{iata:"LHR",country:"GB"}},
     {callsign:"EZY31KG", airline:"EASYJET", type:"A320",
      in_view:false, eta_min:6.0, bearing_deg:212, dist_km:55.0, track_deg:40,
      alt_ft:14000, origin:{iata:"CDG",city:"Paris",country:"FR"}, destination:null},
@@ -271,6 +327,53 @@ const etaText=f=> (f.in_view || !f.eta_min || f.eta_min<=0) ? "NOW" : ("~"+Math.
 /* map ETA (small label): NOW / ~5m */
 const etaMap=f=> (f.in_view || !f.eta_min || f.eta_min<=0) ? "NOW" : ("~"+Math.round(f.eta_min)+"m");
 
+/* emergency transponder squawks (octal) → meaning */
+const EMERG={"7500":"HIJACK","7600":"RADIO FAIL","7700":"EMERGENCY"};
+const emergOf=f=> (f&&f.squawk!=null&&EMERG[String(f.squawk)]) || "";
+
+/* vertical-trend glyph from vs_fpm: climb ▲ / descent ▼ / level – (dash) */
+function trendGlyph(f){
+  const v=f?f.vs_fpm:null;
+  if(v==null) return "";
+  if(v>250)  return `<span class="trend up" title="climbing">&#9650;</span>`;
+  if(v<-250) return `<span class="trend dn" title="descending">&#9660;</span>`;
+  return `<span class="trend lvl" title="level">&#8211;</span>`;
+}
+
+/* ---- diagnostics console (lower strip of the map panel) ---- */
+const padR=(s,n)=>{ s=String(s); return s.length>=n?s:s+" ".repeat(n-s.length); };
+function creditBar(p,n){
+  const f=Math.max(0,Math.min(n,Math.round(p*n)));
+  return "["+"█".repeat(f)+"░".repeat(n-f)+"]";
+}
+function renderDebug(cfg){
+  const el=document.getElementById("debug");
+  const d=cfg&&cfg.debug;
+  if(!d){ el.textContent="DIAG  —  no debug data"; return; }
+  const l1=`SRC ${padR(d.source||"?",10)} SCAN ${padR(d.n_scan,4)} BOARD ${padR(d.n_board,3)} ENR ${d.n_enriched}`;
+  let l2;
+  if(d.fr24===false){
+    l2=`FR24 off`;
+  }else{
+    const cap=d.credits_cap||0;
+    const used=(d.credits_used!=null)?d.credits_used:d.credits_est;
+    const pct=cap?used/cap:0;
+    l2=`FR24 ${used} / ${cap} cr `+
+       `<span class="bar">${creditBar(pct,10)}</span> ${(pct*100).toFixed(1)}%`;
+  }
+  const age=(d.fetched_at!=null)?Math.max(0,Math.round(Date.now()/1000-d.fetched_at)):"?";
+  l2=padR2(l2)+`  AGE ${age}s`;
+  const err=(d.error==null||d.error==="")?"—":String(d.error);
+  const l3=`ERR ${err}`;
+  el.innerHTML=[l1,l2,l3].join("\n");
+}
+/* pad the (possibly HTML-bearing) credits string to a fixed *visible* width */
+function padR2(html){
+  const vis=html.replace(/<[^>]*>/g,"").length;
+  const want=30;
+  return html+(vis<want?" ".repeat(want-vis):"");
+}
+
 function fit(text,n){
   text=(text||"").toUpperCase().replace(/[^A-Z0-9 °\-~]/g," ");
   return (text.length>n?text.slice(0,n):text.padEnd(n," "));
@@ -296,13 +399,19 @@ function rowHtml(f){
     f.type||"",                  // TYPE  aircraft type
     etaText(f),                  // ETA
   ] : COLS.map(()=>"");
-  return `<div class="row">`+COLS.map(([label,n,kind,dim],i)=>{
+  const emg=emergOf(f);
+  return `<div class="row${emg?" emerg":""}">`+COLS.map(([label,n,kind,dim],i)=>{
     if(kind==="text"){
       if(!f) return `<div class="grp airline" style="width:${colWidth(n)}"></div>`;
       const nm=esc(fit((f.airline||f.type_desc||"").toUpperCase(), n*3).trim());
       const sub=esc(originFull(f));
+      // emergency rows carry a bold inverted badge instead of the origin line;
+      // otherwise the origin line is prefixed with the climb/descent glyph.
+      const subHtml = emg
+        ? `<div class="sub"><span class="emerg-badge">! ${esc(f.squawk)} ${esc(emg)}</span></div>`
+        : ((sub||f.vs_fpm!=null)?`<div class="sub">${trendGlyph(f)}${sub}</div>`:"");
       return `<div class="grp airline" style="width:${colWidth(n)}">`+
-             `<div class="nm">${nm}</div>`+(sub?`<div class="sub">${sub}</div>`:"")+
+             `<div class="nm">${nm}</div>`+subHtml+
              `</div>`;
     }
     return `<div class="grp">${tiles(vals[i],n,dim)}</div>`;
@@ -444,6 +553,8 @@ function buildMap(cfg, flights){
         P.push(`<circle cx="${ax.toFixed(1)}" cy="${ay.toFixed(1)}" r="${markR.toFixed(1)}" fill="${dark}" stroke="${paper}" stroke-width="${strokeW}"/>`);
       else
         P.push(`<circle cx="${ax.toFixed(1)}" cy="${ay.toFixed(1)}" r="${(markR*0.92).toFixed(1)}" fill="${paper}" stroke="${grey}" stroke-width="${(strokeW*1.6).toFixed(2)}"/>`);
+      if(emergOf(f))
+        P.push(`<circle cx="${ax.toFixed(1)}" cy="${ay.toFixed(1)}" r="${(markR*1.9).toFixed(1)}" fill="none" stroke="${dark}" stroke-width="${(strokeW*2.6).toFixed(2)}"/>`);
       if(lab){
         const anchor = ax>W-W*0.28?"end":"start";
         const ox = anchor==="end"?-(markR+3):(markR+3);
@@ -462,6 +573,8 @@ function buildMap(cfg, flights){
       const br =[ex+Math.cos(ang-2.5)*t, ey+Math.sin(ang-2.5)*t];
       P.push(`<path d="M${tip[0].toFixed(1)},${tip[1].toFixed(1)} L${bl[0].toFixed(1)},${bl[1].toFixed(1)} `+
              `L${br[0].toFixed(1)},${br[1].toFixed(1)} Z" fill="${inv?dark:grey}"/>`);
+      if(emergOf(f))
+        P.push(`<circle cx="${ex.toFixed(1)}" cy="${ey.toFixed(1)}" r="${(t*1.6).toFixed(1)}" fill="none" stroke="${dark}" stroke-width="${(strokeW*2.6).toFixed(2)}"/>`);
       if(lab){
         // place label on the inboard side of the edge marker
         const anchor = ex>W-W*0.30?"end":(ex<W*0.30?"start":"middle");
@@ -531,6 +644,15 @@ function draw(data){
       (b.voltage!=null?`<span class="batt-v">${b.voltage.toFixed(2)}V</span>`:"");
   } else { be.innerHTML=""; }
 
+  // emergency banner (rare): list any active emergency squawks up top
+  const emerg=flights.filter(emergOf);
+  const eb=document.getElementById("emerg-banner");
+  if(emerg.length){
+    eb.style.display="block";
+    eb.textContent="⚠ EMERGENCY "+emerg.map(f=>f.squawk).join(" ");
+  }else{ eb.style.display="none"; eb.textContent=""; }
+
+  renderDebug(cfg);
   buildMap(cfg, flights);
 }
 
