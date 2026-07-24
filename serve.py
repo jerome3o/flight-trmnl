@@ -35,9 +35,11 @@ import json
 import math
 import re
 import sys
+import time
 import hmac
 import hashlib
 import urllib.request
+import urllib.error
 from datetime import datetime, timezone
 from http.server import HTTPServer, SimpleHTTPRequestHandler
 from urllib.parse import urlparse, parse_qs
@@ -398,67 +400,221 @@ def elevation_deg(dist_km, alt_ft):
 
 
 # ---------------------------------------------------------------- upstream
-def fetch_upstream(source, lat, lon, range_km):
-    nm = min(range_km / 1.852, 250)
-    url = UPSTREAMS[source].format(lat=round(lat, 5), lon=round(lon, 5), nm=round(nm, 1))
-    req = urllib.request.Request(url, headers={"User-Agent": "window-flights/1.0"})
-    with urllib.request.urlopen(req, timeout=15) as resp:
-        return json.loads(resp.read()).get("ac") or []
+# Positions come from the free ADS-B feeds (accurate, unlimited, frequent) and
+# drive the map + prediction. FlightRadar24 (metered, first-party) is spent
+# ONLY to enrich the handful of flights actually on the board with accurate
+# route / airline / ETA: FR24 charges 8 credits per returned flight and the
+# Explorer tier is 30k credits/month, so scanning the whole sky through it
+# would drain the month in minutes. Route data is static per flight, so we
+# cache it hard by callsign and spend credits only on new flights, in-view
+# first, until a monthly safety cap — then we degrade gracefully to no route.
+F24_KEY = os.environ.get("F24_KEY")
+FR24_BASE = "https://fr24api.flightradar24.com"
+FR24_MONTHLY_CAP = int(os.environ.get("FR24_MONTHLY_CREDITS", "29000"))
+FR24_ROUTE_TTL = float(os.environ.get("FR24_ROUTE_TTL", "3600"))
+FR24_ENRICH_MAX = int(os.environ.get("FR24_ENRICH_MAX", "14"))  # flights/render
+FR24_CREDIT_PER_FLIGHT = 8
+_fr24_routes = {}   # callsign -> (ts, route dict | None)
+
+# Live diagnostics surfaced on the board's debug panel.
+# credits_est = our local running tally since restart (always known);
+# credits_used = the real monthly figure from FR24 /api/usage (best-effort).
+DIAG = {"source": None, "n_scan": 0, "n_enriched": 0, "fetched_at": None,
+        "error": None, "credits_used": None, "credits_est": 0,
+        "credits_cap": FR24_MONTHLY_CAP, "credits_at": None, "fr24": bool(F24_KEY)}
+
+
+def _fr24_get(path, params=""):
+    req = urllib.request.Request(FR24_BASE + path + params, headers={
+        "Authorization": f"Bearer {F24_KEY}",
+        "Accept": "application/json", "Accept-Version": "v1",
+        "User-Agent": "window-flights/1.0"})
+    with urllib.request.urlopen(req, timeout=20) as resp:
+        return json.loads(resp.read())
+
+
+def fr24_usage():
+    """Refresh real monthly credit usage for the debug panel (rate-limited)."""
+    now = time.time()
+    if not F24_KEY:
+        return
+    if DIAG["credits_at"] and now - DIAG["credits_at"] < 300:
+        return
+    try:
+        d = _fr24_get("/api/usage", "?period=30d")
+        DIAG["credits_used"] = sum(int(r.get("credits") or 0) for r in (d.get("data") or []))
+    except Exception:
+        pass
+    DIAG["credits_at"] = now
+
+
+def _fr24_budget_ok():
+    # guard on the higher of the real monthly figure and our local estimate
+    used = max(DIAG.get("credits_used") or 0, DIAG.get("credits_est") or 0)
+    return used < FR24_MONTHLY_CAP
+
+
+def fr24_fetch_routes(callsigns):
+    """Fetch routes for up to 15 callsigns in ONE FR24 call (respects the
+    10 req/min limit; costs 8 credits per flight returned). Returns
+    {callsign: route|None}."""
+    out = {}
+    if not F24_KEY or not callsigns:
+        return out
+    cs = ",".join(callsigns[:15])
+    try:
+        d = _fr24_get("/api/live/flight-positions/full", f"?callsigns={cs}")
+        recs = d.get("data") or []
+        for r in recs:
+            c = (r.get("callsign") or "").strip()
+            if not c:
+                continue
+            out[c] = {
+                "orig_iata": r.get("orig_iata"), "orig_icao": r.get("orig_icao"),
+                "dest_iata": r.get("dest_iata"), "dest_icao": r.get("dest_icao"),
+                "airline_code": r.get("operating_as") or r.get("painted_as"),
+                "eta": r.get("eta"), "flight_no": r.get("flight"),
+                "type": r.get("type"), "reg": r.get("reg"),
+            }
+        DIAG["credits_est"] += FR24_CREDIT_PER_FLIGHT * max(1, len(recs))
+    except urllib.error.HTTPError as e:
+        DIAG["error"] = "FR24: out of credits (402)" if e.code == 402 else f"FR24 HTTP {e.code}"
+        if e.code == 402:
+            DIAG["credits_used"] = FR24_MONTHLY_CAP
+    except Exception as e:
+        DIAG["error"] = f"FR24 {type(e).__name__}"
+    return out
+
+
+def _norm_adsb(r):
+    alt = r.get("alt_geom", r.get("alt_baro"))
+    return {
+        "lat": r.get("lat"), "lon": r.get("lon"),
+        "alt_ft": float(alt) if isinstance(alt, (int, float)) else None,
+        "gs_kt": r.get("gs"), "track_deg": r.get("track"),
+        "vs_fpm": r.get("geom_rate", r.get("baro_rate")),
+        "type": r.get("t"), "callsign": (r.get("flight") or "").strip(),
+        "flight_no": None, "reg": r.get("r"), "hex": r.get("hex"),
+        "airline_code": r.get("ownOp"), "squawk": r.get("squawk"),
+    }
+
+
+def fetch_aircraft(source, lat, lon, range_km):
+    """Wide positional scan from the free ADS-B feed (unlimited). Returns
+    normalized records; routes are added later by FR24 enrichment."""
+    try:
+        nm = min(range_km / 1.852, 250)
+        url = UPSTREAMS[source].format(lat=round(lat, 5), lon=round(lon, 5), nm=round(nm, 1))
+        req = urllib.request.Request(url, headers={"User-Agent": "window-flights/1.0"})
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            ac = json.loads(resp.read()).get("ac") or []
+        recs = [_norm_adsb(a) for a in ac
+                if a.get("lat") is not None and a.get("lon") is not None
+                and a.get("alt_geom", a.get("alt_baro")) != "ground"]
+        DIAG.update(source="ADSB+FR24" if F24_KEY else "ADSB",
+                    n_scan=len(recs), fetched_at=time.time(), error=None)
+        return recs
+    except Exception as e:
+        DIAG.update(error=f"ADSB {type(e).__name__}", n_scan=0, fetched_at=time.time())
+        return []
+
+
+def enrich_routes(flights):
+    """Fill origin/destination/airline/eta on up to FR24_ENRICH_MAX board
+    flights (in-view first) via FR24. Routes are cached hard by callsign, so a
+    single batched call per render fetches only the callsigns not already
+    known, and only while under the monthly credit cap."""
+    now = time.time()
+    board = flights[:FR24_ENRICH_MAX]
+    need = [f["callsign"] for f in board if f.get("callsign")
+            and not (_fr24_routes.get(f["callsign"])
+                     and now - _fr24_routes[f["callsign"]][0] < FR24_ROUTE_TTL)]
+    if need and F24_KEY and _fr24_budget_ok():
+        fetched = fr24_fetch_routes(need)
+        for c in need:
+            _fr24_routes[c] = (now, fetched.get(c))   # cache misses too, to avoid re-query
+    DIAG["n_enriched"] = 0
+    for f in board:
+        hit = _fr24_routes.get(f.get("callsign"))
+        rt = hit[1] if hit else None
+        if not rt:
+            continue
+        f["origin"] = airport_info(rt.get("orig_iata"), rt.get("orig_icao"))
+        f["destination"] = airport_info(rt.get("dest_iata"), rt.get("dest_icao"))
+        f["eta"] = rt.get("eta")
+        if rt.get("flight_no"):
+            f["flight_no"] = rt["flight_no"]
+        if rt.get("airline_code"):
+            f["airline"] = airline_for(f.get("callsign"), rt["airline_code"])
+        DIAG["n_enriched"] += 1
+    return flights
+
+
+def airport_info(iata, icao):
+    """{iata, icao, city, country} for an airport code, enriched (and cached)
+    from the free airport reference DB. FR24 gives us the accurate codes; this
+    only adds the human-readable city/country label."""
+    if not (iata or icao):
+        return None
+    info = {"iata": iata, "icao": icao, "city": None, "country": None}
+    if icao:
+        ap = _hexdb_airport(icao)
+        if ap:
+            info["city"] = ap.get("city")
+            info["country"] = ap.get("country")
+            info["iata"] = iata or ap.get("iata")
+    return info
+
+
+def _flight_record(ac, cfg, dist, brg, elev, in_view):
+    """Per-aircraft record from a normalized ADS-B entry. origin/destination/
+    eta start empty and are filled by FR24 enrichment for the final short list."""
+    callsign = ac["callsign"] or ac.get("reg") or ac.get("hex")
+    return {
+        "hex": ac.get("hex"),
+        "callsign": callsign,
+        "flight_no": ac.get("flight_no"),
+        "airline": airline_for(callsign, ac.get("airline_code")),
+        "type": ac.get("type"),
+        "type_desc": TYPE_NAMES.get(ac.get("type")),
+        "registration": ac.get("reg"),
+        "in_view": in_view,
+        "lat": ac["lat"], "lon": ac["lon"],
+        "dist_km": round(dist, 2),
+        "bearing_deg": round(brg, 1),
+        "elevation_deg": round(elev, 1) if elev is not None else None,
+        "alt_ft": ac.get("alt_ft"),
+        "gs_kt": ac.get("gs_kt"),
+        "track_deg": ac.get("track_deg"),
+        "vs_fpm": ac.get("vs_fpm"),
+        "squawk": ac.get("squawk"),
+        "eta": None,
+        "origin": None,
+        "destination": None,
+    }
 
 
 def visible_aircraft(cfg, all_traffic=False):
     """Aircraft in the view cone, nearest first. With all_traffic=True,
     everything airborne within range is returned, flagged via in_view."""
-    ac_list = fetch_upstream(cfg["source"], cfg["lat"], cfg["lon"], cfg["range_km"])
+    ac_list = fetch_aircraft(cfg["source"], cfg["lat"], cfg["lon"], cfg["range_km"])
     half = cfg["fov"] / 2.0
     out = []
     for ac in ac_list:
-        lat, lon = ac.get("lat"), ac.get("lon")
-        if lat is None or lon is None:
-            continue
-        alt = ac.get("alt_geom", ac.get("alt_baro"))
-        if alt == "ground":
-            continue
-        alt_ft = float(alt) if isinstance(alt, (int, float)) else None
-
+        lat, lon = ac["lat"], ac["lon"]
+        alt_ft = ac.get("alt_ft")
         dist = haversine_km(cfg["lat"], cfg["lon"], lat, lon)
         if dist > cfg["range_km"]:
             continue
         brg = bearing_deg(cfg["lat"], cfg["lon"], lat, lon)
-        # unknown altitude passes the elevation gate (can't judge it)
         elev = elevation_deg(dist, alt_ft) if alt_ft is not None else None
         in_view = (angle_diff(brg, cfg["bearing"]) <= half
                    and (elev is None or elev >= cfg["min_elev"]))
         if not in_view and not all_traffic:
             continue
-
-        type_code = ac.get("t")
-        callsign = (ac.get("flight") or "").strip() or ac.get("r") or ac.get("hex")
-        out.append({
-            "hex": ac.get("hex"),
-            "callsign": callsign,
-            "airline": airline_for(callsign, ac.get("ownOp")),
-            "type": type_code,
-            "type_desc": ac.get("desc") or TYPE_NAMES.get(type_code),
-            "registration": ac.get("r"),
-            "country": (country := reg_country(ac.get("r"))),
-            "flag": flag_emoji(country),
-            "in_view": in_view,
-            "lat": lat,
-            "lon": lon,
-            "dist_km": round(dist, 2),
-            "bearing_deg": round(brg, 1),
-            "elevation_deg": round(elev, 1) if elev is not None else None,
-            "alt_ft": alt_ft,
-            "gs_kt": ac.get("gs"),
-            "track_deg": ac.get("track"),
-        })
+        out.append(_flight_record(ac, cfg, dist, brg, elev, in_view))
     out.sort(key=lambda f: f["dist_km"])
-    routes = lookup_routes([(f["callsign"], f["lat"], f["lon"]) for f in out])
-    for f in out:
-        r = routes.get(f["callsign"])
-        f["origin"] = r[0] if r else None
-        f["destination"] = r[1] if r else None
+    enrich_routes(out)
     return out
 
 
@@ -586,19 +742,13 @@ def board_data(cfg):
     """In-view + soon-to-be-in-view aircraft for the display, each tagged with
     eta_min (0 = currently in view). Also returns the view-cone config so the
     board can draw the map."""
-    ac_list = fetch_upstream(cfg["source"], cfg["lat"], cfg["lon"], PREDICT_RANGE_KM)
+    ac_list = fetch_aircraft(cfg["source"], cfg["lat"], cfg["lon"], PREDICT_RANGE_KM)
     half = cfg["fov"] / 2.0
     out = []
     for ac in ac_list:
-        lat, lon = ac.get("lat"), ac.get("lon")
-        if lat is None or lon is None:
-            continue
-        alt = ac.get("alt_geom", ac.get("alt_baro"))
-        if alt == "ground":
-            continue
-        alt_ft = float(alt) if isinstance(alt, (int, float)) else None
-        gs, track = ac.get("gs"), ac.get("track")
-        vs = ac.get("geom_rate", ac.get("baro_rate"))
+        lat, lon = ac["lat"], ac["lon"]
+        alt_ft = ac.get("alt_ft")
+        gs, track, vs = ac.get("gs_kt"), ac.get("track_deg"), ac.get("vs_fpm")
         dist = haversine_km(cfg["lat"], cfg["lon"], lat, lon)
         brg = bearing_deg(cfg["lat"], cfg["lon"], lat, lon)
         elev = elevation_deg(dist, alt_ft) if alt_ft is not None else None
@@ -608,32 +758,14 @@ def board_data(cfg):
         eta_s = 0 if in_view else _entry_eta_s(cfg, lat, lon, alt_ft, gs, track, vs, half)
         if eta_s is None:
             continue
-        type_code = ac.get("t")
-        callsign = (ac.get("flight") or "").strip() or ac.get("r") or ac.get("hex")
-        out.append({
-            "hex": ac.get("hex"),
-            "callsign": callsign,
-            "airline": airline_for(callsign, ac.get("ownOp")),
-            "type": type_code,
-            "type_desc": ac.get("desc") or TYPE_NAMES.get(type_code),
-            "in_view": in_view,
-            "eta_min": round(eta_s / 60.0, 1),
-            "bearing_deg": round(brg, 1),
-            "dist_km": round(dist, 2),
-            "track_deg": track,
-            "alt_ft": alt_ft,
-            "gs_kt": gs,
-            "lat": lat,
-            "lon": lon,
-        })
+        rec = _flight_record(ac, cfg, dist, brg, elev, in_view)
+        rec["eta_min"] = round(eta_s / 60.0, 1)
+        out.append(rec)
     # in-view first, then soonest arrivals; keep the board readable
     out.sort(key=lambda f: (not f["in_view"], f["eta_min"], f["dist_km"]))
     out = out[:MAX_BOARD_FLIGHTS]
-    routes = lookup_routes([(f["callsign"], f["lat"], f["lon"]) for f in out])
-    for f in out:
-        r = routes.get(f["callsign"])
-        f["origin"] = r[0] if r else None
-        f["destination"] = r[1] if r else None
+    enrich_routes(out)          # FR24 routes for just these (in-view first)
+    fr24_usage()                # refresh credit counter for the debug panel
     return {
         "config": {
             "bearing": cfg["bearing"],
@@ -644,6 +776,18 @@ def board_data(cfg):
             "horizon_min": PREDICT_HORIZON_S / 60.0,
             "geo": build_geo(cfg["lat"], cfg["lon"]),
             "battery": dict(LAST_DEVICE),
+            "debug": {
+                "source": DIAG["source"],
+                "n_scan": DIAG["n_scan"],
+                "n_board": len(out),
+                "n_enriched": DIAG["n_enriched"],
+                "fetched_at": DIAG["fetched_at"],
+                "error": DIAG["error"],
+                "fr24": DIAG["fr24"],
+                "credits_used": DIAG["credits_used"],
+                "credits_est": DIAG["credits_est"],
+                "credits_cap": DIAG["credits_cap"],
+            },
         },
         "flights": out,
     }
