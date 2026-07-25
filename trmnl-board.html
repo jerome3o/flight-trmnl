@@ -250,10 +250,10 @@ function layout(){
    the file previews standalone. e = km EAST of home, n = km NORTH (neg = south);
    the Thames + landmarks sit south of the flat, matching the real backend. */
 const SAMPLE={
-  config:{bearing:168.0, fov:145.0, range_km:25.0, predict_range_km:180.0,
-    map_range_km:20.0, horizon_min:10.0,
+  config:{bearing:168.0, fov:145.0, range_km:25.0, predict_range_km:30.0,
+    map_range_km:20.0, horizon_min:4.0,
     battery:{voltage:3.98, percent:77, rssi:-61},
-    debug:{source:"ADSB+FR24", n_scan:318, n_board:6, n_enriched:6,
+    debug:{source:"ADSB+FR24", n_scan:318, n_board:6, n_held:2, n_enriched:6,
       fetched_at:Date.now()/1000-4, error:null, fr24:true,
       credits_used:120, credits_est:48, credits_cap:29000},
     geo:{
@@ -350,7 +350,8 @@ function renderDebug(cfg){
   const el=document.getElementById("debug");
   const d=cfg&&cfg.debug;
   if(!d){ el.textContent="DIAG  —  no debug data"; return; }
-  const l1=`SRC ${padR(d.source||"?",10)} SCAN ${padR(d.n_scan,4)} BOARD ${padR(d.n_board,3)} ENR ${d.n_enriched}`;
+  const l1=`SRC ${padR(d.source||"?",10)} SCAN ${padR(d.n_scan,4)} BOARD ${padR(d.n_board,3)}`+
+           ` ENR ${padR(d.n_enriched,3)} HELD ${d.n_held||0}`;
   let l2;
   if(d.fr24===false){
     l2=`FR24 off`;

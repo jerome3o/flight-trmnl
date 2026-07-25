@@ -23,6 +23,13 @@ services:
       # ROUTE_PROVIDERS: "adsbdb,hexdb"   # origin/destination lookup chain
       # ROUTE_STRICT: "1"      # require both DBs to agree on a route, else blank
 
+      # --- arrival prediction (see .env.example for the reasoning) ---
+      # PREDICT_RANGE_KM: "30"     # scan radius for approaching traffic
+      # PREDICT_HORIZON_MIN: "4"   # how far ahead to project
+      # PREDICT_CONFIRM: "2"       # renders a prediction must survive (1 = off)
+      # PREDICT_MISS_MAX_KM: "0"   # 0 = off; drop predictions missing by more
+      # MAX_BOARD_FLIGHTS: "14"    # rows on the board
+
       # --- BYOS display (point the TRMNL at http://<host-ip>:8000) ---
       # Match your panel; firmware rejects a wrong-sized image (see .env.example)
       # RENDER_WIDTH: "1872"    # TRMNL X: 1872x1404 4bit | OG: 800x480 2bit
