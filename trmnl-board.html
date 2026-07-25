@@ -250,10 +250,10 @@ function layout(){
    the file previews standalone. e = km EAST of home, n = km NORTH (neg = south);
    the Thames + landmarks sit south of the flat, matching the real backend. */
 const SAMPLE={
-  config:{bearing:168.0, fov:145.0, range_km:25.0, predict_range_km:180.0,
-    map_range_km:20.0, horizon_min:10.0,
+  config:{bearing:168.0, fov:145.0, range_km:25.0, predict_range_km:30.0,
+    map_range_km:20.0, horizon_min:4.0,
     battery:{voltage:3.98, percent:77, rssi:-61},
-    debug:{source:"ADSB+FR24", n_scan:318, n_board:6, n_enriched:6,
+    debug:{source:"ADSB+FR24", n_scan:318, n_board:6, n_held:2, n_enriched:6,
       fetched_at:Date.now()/1000-4, error:null, fr24:true,
       credits_used:120, credits_est:48, credits_cap:29000},
     geo:{
@@ -263,7 +263,6 @@ const SAMPLE={
         [5.50,-1.95],[6.40,-1.60]],
       landmarks:[
         {name:"SHARD",     e:-1.55, n:-1.42},
-        {name:"TOWER BR",  e:-0.79, n:-1.31},
         {name:"ST PAUL'S", e:-2.38, n:-0.38},
         {name:"CANARY WHF",e: 2.81, n:-1.32},
         {name:"THE O2",    e: 4.65, n:-1.58},
@@ -350,7 +349,8 @@ function renderDebug(cfg){
   const el=document.getElementById("debug");
   const d=cfg&&cfg.debug;
   if(!d){ el.textContent="DIAG  —  no debug data"; return; }
-  const l1=`SRC ${padR(d.source||"?",10)} SCAN ${padR(d.n_scan,4)} BOARD ${padR(d.n_board,3)} ENR ${d.n_enriched}`;
+  const l1=`SRC ${padR(d.source||"?",10)} SCAN ${padR(d.n_scan,4)} BOARD ${padR(d.n_board,3)}`+
+           ` ENR ${padR(d.n_enriched,3)} HELD ${d.n_held||0}`;
   let l2;
   if(d.fr24===false){
     l2=`FR24 off`;
@@ -435,9 +435,12 @@ function rayToRect(hx,hy,px,py,minX,minY,maxX,maxY){
   return [hx+dx*t, hy+dy*t];
 }
 
-/* ZOOMED forward-facing local map. Home sits near the TOP (north up, so
-   everything north of the flat is cropped); the window faces SSE, so the
-   view cone, the Thames and the landmarks all fall into the lower part. */
+/* ZOOMED forward-facing local map, drawn VIEW-UP: the direction the window
+   faces points straight up the screen, so the map matches what you actually
+   see out of it — left on the map is left through the glass, and further up
+   the panel is further away. Home therefore sits near the BOTTOM with the
+   cone opening upward, and the small amount of world behind you is cropped.
+   North is no longer up, so the compass rose (top-left) rotates instead. */
 function buildMap(cfg, flights){
   const svg=document.getElementById("svg");
   const box=svg.getBoundingClientRect();
@@ -451,12 +454,21 @@ function buildMap(cfg, flights){
   const mapRange=cfg.map_range_km||20;
   const geo=cfg.geo||{};
 
-  // projection: home near top-centre, fixed zoom to map_range_km.
+  // projection: VIEW-UP. The world is rotated by the viewing bearing so that
+  // bearing points up the screen, then home sits near the bottom-centre at a
+  // fixed zoom to map_range_km.
   const pxPerKm=(H*0.80)/mapRange;
-  const homeX=W/2, homeY=H*0.14;
-  const proj=(e,n)=>[homeX + e*pxPerKm, homeY - n*pxPerKm];
-  // polar (bearing,dist) → (e,n): e=d·sinB, n=d·cosB
-  const projBD=(bd,d)=>proj(d*Math.sin(bd*D2R), d*Math.cos(bd*D2R));
+  const homeX=W/2, homeY=H*0.86;
+  const vb=bearing*D2R, cosB=Math.cos(vb), sinB=Math.sin(vb);
+  // (e,n) km east/north of home → screen px, rotated so `bearing` is up
+  const proj=(e,n)=>[homeX + (e*cosB - n*sinB)*pxPerKm,
+                     homeY - (e*sinB + n*cosB)*pxPerKm];
+  // polar (compass bearing, dist) → screen px; relative bearing 0 = straight up
+  const projBD=(bd,d)=>{const a=(bd-bearing)*D2R;
+                        return [homeX + d*Math.sin(a)*pxPerKm,
+                                homeY - d*Math.cos(a)*pxPerKm];};
+  // compass bearing → unit vector in screen space (heading arrows, compass rose)
+  const dirBD=b=>{const a=(b-bearing)*D2R; return [Math.sin(a), -Math.cos(a)];};
 
   const P=[]; // svg pieces
   const dark="var(--w)", grey="var(--l)", lite="var(--d)", paper="var(--k)";
@@ -491,9 +503,8 @@ function buildMap(cfg, flights){
     const rr=km*pxPerKm;
     P.push(`<circle cx="${homeX}" cy="${homeY}" r="${rr.toFixed(1)}" fill="none" stroke="${lite}" `+
            `stroke-width="${strokeW}" stroke-opacity="0.9"/>`);
-    // labels sit west of the centre bearing line (which drifts east) so
-    // southbound traffic rarely lands on them
-    P.push(`<text x="${(homeX-fs*2.4).toFixed(1)}" y="${(homeY+rr-fs*0.35).toFixed(1)}" `+
+    // labels ride up the ring ahead of home, just left of the centre line
+    P.push(`<text x="${(homeX-fs*2.4).toFixed(1)}" y="${(homeY-rr+fs*0.85).toFixed(1)}" `+
            `text-anchor="end" font-family="Oswald,sans-serif" font-size="${(fs*0.62).toFixed(1)}" fill="${grey}">${km}km</text>`);
   }
 
@@ -519,9 +530,10 @@ function buildMap(cfg, flights){
     if(x<fs||x>W-fs||y<0||y>H) continue;
     P.push(`<rect x="${(x-lmR).toFixed(1)}" y="${(y-lmR).toFixed(1)}" width="${(lmR*2).toFixed(1)}" `+
            `height="${(lmR*2).toFixed(1)}" fill="${paper}" stroke="${grey}" stroke-width="${strokeW}"/>`);
-    // label pushed OUTWARD from home (west markers left, east markers right) so
-    // the dense central cluster (Shard / Tower Br / St Paul's) spreads apart
-    const right = lm.e >= 0;
+    // label pushed OUTWARD from the centre line so the dense cluster
+    // (Shard / Tower Br / St Paul's) spreads apart. Screen-relative, not
+    // geographic — the map is rotated, so lm.e no longer means "right".
+    const right = x >= homeX;
     P.push(`<text x="${(x+(right?lmR+3:-lmR-3)).toFixed(1)}" y="${(y+fs*0.32).toFixed(1)}" `+
            `text-anchor="${right?"start":"end"}" font-family="Oswald,sans-serif" `+
            `font-size="${(fs*0.56).toFixed(1)}" fill="${grey}">${esc(lm.name)}</text>`);
@@ -544,7 +556,7 @@ function buildMap(cfg, flights){
     if(onPanel){
       // heading arrow along track_deg
       if(f.track_deg!=null){
-        const dx=Math.sin(f.track_deg*D2R), dy=-Math.cos(f.track_deg*D2R);
+        const [dx,dy]=dirBD(f.track_deg);
         P.push(`<line x1="${ax.toFixed(1)}" y1="${ay.toFixed(1)}" x2="${(ax+dx*arrowLen).toFixed(1)}" `+
                `y2="${(ay+dy*arrowLen).toFixed(1)}" stroke="${inv?dark:grey}" `+
                `stroke-width="${(strokeW*1.6).toFixed(2)}" marker-end="url(#${inv?"ah":"ahg"})"/>`);
@@ -596,12 +608,29 @@ function buildMap(cfg, flights){
 
   P.push(`</g>`); // end clip
 
-  // ---- North indicator, top-left (outside clip so always visible) ----
-  const nx=fs*1.4, ny=fs*1.6;
-  P.push(`<path d="M${nx.toFixed(1)},${(ny-fs*0.7).toFixed(1)} l${(-fs*0.34).toFixed(1)},${(fs*0.8).toFixed(1)} `+
-         `l${(fs*0.68).toFixed(1)},0 Z" fill="${dark}"/>`);
-  P.push(`<text x="${nx.toFixed(1)}" y="${(ny+fs*1.35).toFixed(1)}" text-anchor="middle" `+
-         `font-family="Oswald,sans-serif" font-weight="600" font-size="${(fs*0.9).toFixed(1)}" fill="${dark}">N</text>`);
+  // ---- compass rose, top-left (outside clip so always visible) ----
+  // The map is view-up, so north is NOT up: the needle carries the rotation.
+  const nx=fs*2.1, ny=fs*2.1, nr=fs*0.95;
+  const [ndx,ndy]=dirBD(0);                       // where north lies on screen
+  P.push(`<circle cx="${nx.toFixed(1)}" cy="${ny.toFixed(1)}" r="${nr.toFixed(1)}" `+
+         `fill="${paper}" stroke="${grey}" stroke-width="${strokeW}"/>`);
+  P.push(`<line x1="${(nx-ndx*nr*0.7).toFixed(1)}" y1="${(ny-ndy*nr*0.7).toFixed(1)}" `+
+         `x2="${(nx+ndx*nr*0.7).toFixed(1)}" y2="${(ny+ndy*nr*0.7).toFixed(1)}" `+
+         `stroke="${dark}" stroke-width="${(strokeW*1.6).toFixed(2)}"/>`);
+  const nhx=nx+ndx*nr, nhy=ny+ndy*nr, na=Math.atan2(ndy,ndx), nt=fs*0.32;
+  P.push(`<path d="M${(nhx+Math.cos(na)*nt).toFixed(1)},${(nhy+Math.sin(na)*nt).toFixed(1)} `+
+         `L${(nhx+Math.cos(na+2.5)*nt).toFixed(1)},${(nhy+Math.sin(na+2.5)*nt).toFixed(1)} `+
+         `L${(nhx+Math.cos(na-2.5)*nt).toFixed(1)},${(nhy+Math.sin(na-2.5)*nt).toFixed(1)} Z" fill="${dark}"/>`);
+  // "N" stays upright at the needle's tip, wherever that lands
+  P.push(`<text x="${(nx+ndx*nr*2.0).toFixed(1)}" y="${(ny+ndy*nr*2.0+fs*0.30).toFixed(1)}" `+
+         `text-anchor="middle" font-family="Oswald,sans-serif" font-weight="600" `+
+         `font-size="${(fs*0.82).toFixed(1)}" fill="${dark}">N</text>`);
+
+  // ---- heading label, top-centre: says what "up" means on this map ----
+  P.push(`<text x="${(W/2).toFixed(1)}" y="${(fs*1.1).toFixed(1)}" text-anchor="middle" `+
+         `font-family="Oswald,sans-serif" font-weight="600" letter-spacing="1.5" `+
+         `font-size="${(fs*0.7).toFixed(1)}" fill="${grey}">`+
+         `VIEW ${Math.round(bearing)}° ${cardinal(bearing)}</text>`);
 
   svg.innerHTML=P.join("");
 }

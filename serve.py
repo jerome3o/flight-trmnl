@@ -399,6 +399,15 @@ def elevation_deg(dist_km, alt_ft):
     return math.degrees(math.atan2(alt_km - drop, dist_km))
 
 
+def enu_km(lat, lon, home_lat, home_lon):
+    """East/north offset in km from home (equirectangular). Exact enough over
+    the tens of km the prediction works in, and being a flat frame it lets the
+    approach be solved as plane geometry."""
+    east = math.radians(lon - home_lon) * math.cos(math.radians(home_lat)) * EARTH_R_KM
+    north = math.radians(lat - home_lat) * EARTH_R_KM
+    return east, north
+
+
 # ---------------------------------------------------------------- upstream
 # Positions come from the free ADS-B feeds (accurate, unlimited, frequent) and
 # drive the map + prediction. FlightRadar24 (metered, first-party) is spent
@@ -589,6 +598,7 @@ def _flight_record(ac, cfg, dist, brg, elev, in_view):
         "vs_fpm": ac.get("vs_fpm"),
         "squawk": ac.get("squawk"),
         "eta": None,
+        "miss_km": None,      # set by board_data for predicted arrivals
         "origin": None,
         "destination": None,
     }
@@ -620,47 +630,119 @@ def visible_aircraft(cfg, all_traffic=False):
 
 # ------------------------------------------------------------- prediction
 # How far out to scan for approaching traffic, and how far ahead to look.
-# A fast jet covers ~170 km in 10 min, so scan a wide radius but only keep
-# aircraft that actually reach the (small) view cone within the horizon.
-PREDICT_RANGE_KM = float(os.environ.get("PREDICT_RANGE_KM", "180"))
-PREDICT_HORIZON_S = int(float(os.environ.get("PREDICT_HORIZON_MIN", "10")) * 60)
+#
+# The scan radius is set by how accurate a straight-line projection can be, not
+# by how far an aircraft could theoretically travel. To pass within RANGE_KM
+# (5 km) of home, an aircraft's heading has to be right to within
+# atan(range/distance): +/-9.5 deg from 30 km, but only +/-2 deg from 140 km —
+# tighter than the turns terminal traffic makes constantly, so distant
+# predictions are noise. 30 km keeps the tolerance near +/-10 deg, and the
+# horizon is set to match: 30 km at approach speeds (180-250 kt) is ~4 min.
+PREDICT_RANGE_KM = float(os.environ.get("PREDICT_RANGE_KM", "30"))
+PREDICT_HORIZON_S = int(float(os.environ.get("PREDICT_HORIZON_MIN", "4")) * 60)
+# Sampling interval for the *angular* checks only; the range crossing itself is
+# solved in closed form (see _entry_prediction), so this no longer decides
+# whether a crossing is detected at all.
 PREDICT_STEP_S = int(os.environ.get("PREDICT_STEP_S", "20"))
 MAX_BOARD_FLIGHTS = int(os.environ.get("MAX_BOARD_FLIGHTS", "14"))
 
+# Drop predictions whose closest approach is farther than this. Defaults to
+# "off" (any track that enters the range circle counts); lower it toward 0 to
+# keep only aircraft predicted to pass more or less overhead.
+PREDICT_MISS_MAX_KM = float(os.environ.get("PREDICT_MISS_MAX_KM", "0") or 0) or None
 
-def project_position(lat, lon, track_deg, dist_km):
-    """Great-circle destination point dist_km along heading track_deg."""
-    d = dist_km / EARTH_R_KM
-    b = math.radians(track_deg)
-    p1, l1 = math.radians(lat), math.radians(lon)
-    p2 = math.asin(math.sin(p1) * math.cos(d)
-                   + math.cos(p1) * math.sin(d) * math.cos(b))
-    l2 = l1 + math.atan2(math.sin(b) * math.sin(d) * math.cos(p1),
-                         math.cos(d) - math.sin(p1) * math.sin(p2))
-    return math.degrees(p2), math.degrees(l2)
+# Predictions are re-derived from scratch every render, so one noisy projection
+# could flash a flight onto the board and drop it again. Require this many
+# consecutive renders predicting the same aircraft before it earns a row. Set
+# to 1 to disable. Aircraft actually in view are never held back.
+PREDICT_CONFIRM = max(1, int(os.environ.get("PREDICT_CONFIRM", "2")))
+_predict_streak = {}   # hex -> consecutive renders this aircraft was predicted
 
 
-def _entry_eta_s(cfg, lat, lon, alt_ft, gs_kt, track_deg, vs_fpm, half):
-    """Seconds until the aircraft first enters the view cone (bearing within
-    FOV, within range, high enough), extrapolating its current heading/speed/
-    climb — or None if it never does within the horizon. Straight-line
-    projection: good for a ~10 min look-ahead, approximate for turning traffic."""
+def _cpa(e0, n0, ve, vn, radius_km):
+    """Closest approach of a straight track to the circle of radius radius_km
+    centred on home, worked in the flat east/north frame.
+
+    Returns (t_enter, t_exit, miss_km), times in seconds from now. t_enter is
+    None when the track never reaches the circle, in which case miss_km still
+    reports by how far it is predicted to miss."""
+    speed2 = ve * ve + vn * vn
+    if speed2 <= 0:
+        return None, None, None
+    # |r0 + v t| is minimised where its derivative vanishes: t = -(r0.v)/|v|^2
+    t_cpa = -(e0 * ve + n0 * vn) / speed2
+    miss = math.hypot(e0 + ve * t_cpa, n0 + vn * t_cpa)
+    if miss > radius_km:
+        return None, None, miss
+    # |r0 + v t| = radius has two roots, sitting either side of t_cpa
+    half_chord = math.sqrt(max(0.0, radius_km ** 2 - miss ** 2) / speed2)
+    return t_cpa - half_chord, t_cpa + half_chord, miss
+
+
+def _entry_prediction(cfg, lat, lon, alt_ft, gs_kt, track_deg, vs_fpm, half):
+    """(seconds until the aircraft enters the view cone, predicted miss
+    distance in km). eta is None when it never enters within the horizon.
+
+    Reaching the range circle is the binding constraint — with a wide FOV
+    almost anything that gets within range is inside the bearing wedge too — so
+    that crossing is solved in closed form rather than sampled, and the angular
+    checks then run only across the interval already known to be in range. The
+    old fixed 20 s stepping could straddle the whole cone between samples (a
+    450 kt jet crosses 5 km in 22 s) while letting a single grazing sample earn
+    a board row; neither is possible now.
+
+    miss_km doubles as a confidence signal: a track predicted to pass 0.5 km
+    away is near-certain, one grazing the edge of the circle is a coin flip.
+
+    Still a straight-line projection, so it degrades on turning traffic — that
+    is what PREDICT_RANGE_KM's tolerance budget is there to bound."""
     if not gs_kt or gs_kt < 30 or track_deg is None:
-        return None
-    for t in range(PREDICT_STEP_S, PREDICT_HORIZON_S + 1, PREDICT_STEP_S):
-        dist_km = gs_kt * 1.852 * (t / 3600.0)   # kt -> km/h -> km in t s
-        plat, plon = project_position(lat, lon, track_deg, dist_km)
-        d = haversine_km(cfg["lat"], cfg["lon"], plat, plon)
-        if d > cfg["range_km"]:
-            continue
-        if angle_diff(bearing_deg(cfg["lat"], cfg["lon"], plat, plon),
+        return None, None
+    e0, n0 = enu_km(lat, lon, cfg["lat"], cfg["lon"])
+    speed = gs_kt * 1.852 / 3600.0          # kt -> km/s
+    ve = speed * math.sin(math.radians(track_deg))
+    vn = speed * math.cos(math.radians(track_deg))
+    t_enter, t_exit, miss = _cpa(e0, n0, ve, vn, cfg["range_km"])
+    if t_enter is None or t_exit <= 0 or t_enter > PREDICT_HORIZON_S:
+        return None, miss
+    # Walk the in-range interval for the first moment it is also inside the
+    # wedge and high enough to clear the skyline.
+    t0, t1 = max(t_enter, 0.0), min(t_exit, float(PREDICT_HORIZON_S))
+    steps = max(1, min(12, int((t1 - t0) / PREDICT_STEP_S) + 1))
+    for i in range(steps + 1):
+        t = t0 + (t1 - t0) * i / steps
+        e, n = e0 + ve * t, n0 + vn * t
+        if angle_diff((math.degrees(math.atan2(e, n)) + 360.0) % 360.0,
                       cfg["bearing"]) > half:
             continue
         a = (alt_ft + (vs_fpm or 0) * (t / 60.0)) if alt_ft is not None else None
-        elev = elevation_deg(d, a) if a is not None else None
+        elev = elevation_deg(math.hypot(e, n), a) if a is not None else None
         if elev is None or elev >= cfg["min_elev"]:
-            return t
-    return None
+            return t, miss
+    return None, miss
+
+
+def _apply_confirmation(candidates):
+    """Hold a predicted flight back until it has been predicted on
+    PREDICT_CONFIRM consecutive renders, so one noisy projection never reaches
+    the board on its own. Aircraft already in view bypass this entirely — a
+    real sighting should never be delayed. Returns (kept, n_held)."""
+    kept, seen = [], set()
+    for f in candidates:
+        key = f.get("hex") or f.get("callsign")
+        seen.add(key)
+        if f["in_view"]:
+            _predict_streak[key] = PREDICT_CONFIRM    # real now; don't hold it
+            kept.append(f)
+            continue
+        streak = _predict_streak.get(key, 0) + 1
+        _predict_streak[key] = streak
+        if streak >= PREDICT_CONFIRM:
+            kept.append(f)
+    for key in list(_predict_streak):     # any gap in the scan breaks the streak
+        if key not in seen:
+            del _predict_streak[key]
+    return kept, len(candidates) - len(kept)
 
 
 # How much of the surroundings the map shows (radius in km from home). Much
@@ -685,7 +767,6 @@ _THAMES = [
 # Notable landmarks south of the flat (lat, lon, short label).
 _LANDMARKS = [
     (51.5045, -0.0865, "SHARD"),
-    (51.5055, -0.0754, "TOWER BR"),
     (51.5138, -0.0984, "ST PAUL'S"),
     (51.5054, -0.0235, "CANARY WHF"),
     (51.5030,  0.0032, "THE O2"),
@@ -695,9 +776,8 @@ _LANDMARKS = [
 
 
 def _rel_km(lat, lon, home_lat, home_lon):
-    """East/north offset in km from home (equirectangular — fine at city scale)."""
-    east = math.radians(lon - home_lon) * math.cos(math.radians(home_lat)) * EARTH_R_KM
-    north = math.radians(lat - home_lat) * EARTH_R_KM
+    """enu_km at metre precision for the map's JSON payload."""
+    east, north = enu_km(lat, lon, home_lat, home_lon)
     return round(east, 3), round(north, 3)
 
 
@@ -755,12 +835,20 @@ def board_data(cfg):
         in_view = (dist <= cfg["range_km"]
                    and angle_diff(brg, cfg["bearing"]) <= half
                    and (elev is None or elev >= cfg["min_elev"]))
-        eta_s = 0 if in_view else _entry_eta_s(cfg, lat, lon, alt_ft, gs, track, vs, half)
+        if in_view:
+            eta_s, miss = 0.0, 0.0
+        else:
+            eta_s, miss = _entry_prediction(cfg, lat, lon, alt_ft, gs, track, vs, half)
+            if eta_s is not None and PREDICT_MISS_MAX_KM is not None \
+                    and miss is not None and miss > PREDICT_MISS_MAX_KM:
+                continue
         if eta_s is None:
             continue
         rec = _flight_record(ac, cfg, dist, brg, elev, in_view)
         rec["eta_min"] = round(eta_s / 60.0, 1)
+        rec["miss_km"] = round(miss, 2) if miss is not None else None
         out.append(rec)
+    out, n_held = _apply_confirmation(out)
     # in-view first, then soonest arrivals; keep the board readable
     out.sort(key=lambda f: (not f["in_view"], f["eta_min"], f["dist_km"]))
     out = out[:MAX_BOARD_FLIGHTS]
@@ -780,6 +868,7 @@ def board_data(cfg):
                 "source": DIAG["source"],
                 "n_scan": DIAG["n_scan"],
                 "n_board": len(out),
+                "n_held": n_held,
                 "n_enriched": DIAG["n_enriched"],
                 "fetched_at": DIAG["fetched_at"],
                 "error": DIAG["error"],
