@@ -164,8 +164,8 @@
 
   <div class="controls">
     <div class="ctl">
-      <label>Window bearing <output id="oBearing">168° SSE</output></label>
-      <input type="range" id="bearing" min="0" max="359" step="1" value="168">
+      <label>Window bearing <output id="oBearing">135° SE</output></label>
+      <input type="range" id="bearing" min="0" max="359" step="1" value="135">
     </div>
     <div class="ctl">
       <label>Field of view <output id="oFov">145°</output></label>
@@ -266,7 +266,7 @@ function elevationDeg(distKm,altFt){
 /* ---------------- state ---------------- */
 const S = {
   lat:HOME.lat, lon:HOME.lon,
-  bearing:168, fov:145, rangeKm:5, minElev:8,
+  bearing:135, fov:145, rangeKm:5, minElev:8,
   source:"adsblol", refresh:20,
   timer:null, planes:new Map(),   // hex → {marker,data}
 };
