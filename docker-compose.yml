@@ -15,7 +15,7 @@ services:
       # --- the view cone (set your own location; see .env.example) ---
       # LAT: "51.5074"
       # LON: "-0.1278"
-      # BEARING: "168"
+      # BEARING: "120"
       # FOV: "145"
       # RANGE_KM: "5"
       # MIN_ELEV: "8"

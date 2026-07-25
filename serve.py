@@ -8,10 +8,10 @@ Endpoints:
   /api/visible      JSON array of aircraft currently in the view cone
 
 /api/visible with no parameters uses the built-in window defaults
-(168° SSE, 145° FOV, 5 km, min elevation 8° from the configured location). Every
+(120° ESE, 145° FOV, 5 km, min elevation 8° from the configured location). Every
 parameter can be overridden:
 
-  /api/visible?lat=51.5074&lon=-0.1278&bearing=168&fov=145&range_km=5&min_elev=8&source=adsblol
+  /api/visible?lat=51.5074&lon=-0.1278&bearing=120&fov=145&range_km=5&min_elev=8&source=adsblol
 
 Response: a JSON array, one object per aircraft, nearest first:
 
@@ -52,7 +52,7 @@ EARTH_R_KM = 6371.0088
 DEFAULTS = {
     "lat": None,
     "lon": None,
-    "bearing": 168.0,
+    "bearing": 120.0,
     "fov": 145.0,
     "range_km": 5.0,
     "min_elev": 8.0,
