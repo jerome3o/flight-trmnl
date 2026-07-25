@@ -767,7 +767,6 @@ _THAMES = [
 # Notable landmarks south of the flat (lat, lon, short label).
 _LANDMARKS = [
     (51.5045, -0.0865, "SHARD"),
-    (51.5055, -0.0754, "TOWER BR"),
     (51.5138, -0.0984, "ST PAUL'S"),
     (51.5054, -0.0235, "CANARY WHF"),
     (51.5030,  0.0032, "THE O2"),
