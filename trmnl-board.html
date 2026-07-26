@@ -4,12 +4,16 @@
 <meta charset="UTF-8">
 <title>Overhead — map + split-flap board</title>
 <!--
-  Two-panel "window watch" screen for TRMNL BYOS rendering.
+  "Window watch" screen for TRMNL BYOS rendering: a full-width header, the
+  map and board side by side beneath it, and a diagnostics line along the
+  bottom.
 
-  · LEFT  (~45%): a top-down radar-style vector map centred on home — view
-    cone, range rings, north, home marker and each aircraft plotted at its
-    (bearing, distance) with a heading arrow + callsign/ETA label.
-  · RIGHT (~55%): the split-flap departure board, now with an ETA column.
+  · LEFT  (68%): a view-up radar-style vector map centred on home — view
+    cone, range rings, Thames, landmarks, compass rose, home marker, and each
+    aircraft plotted at its (bearing, distance) with a heading arrow and its
+    flight number.
+  · RIGHT (32%): one split-flap list — FLIGHT · FROM · TO · ETA, with the
+    airline and origin as a text line above each row's tiles.
 
   · Resolution-independent: the layout fills the viewport, so the same file
     renders correctly at 800×480 (TRMNL OG) or 1872×1404 (TRMNL X). Point
@@ -42,51 +46,57 @@
   }
   *{box-sizing:border-box;margin:0;padding:0}
   html,body{width:100vw;height:100vh;overflow:hidden}
+  /* Full-width header on top, map + board side by side beneath, diagnostics
+     as a full-width strip along the bottom — so the map keeps its whole
+     height instead of giving a slice back to the console. */
   body{
     background:var(--k);
     font-family:'Oswald','Arial Narrow',Arial,sans-serif;
     color:var(--w);
-    display:flex;flex-direction:row;
+    display:flex;flex-direction:column;
   }
+  .main{flex:1 1 auto;min-height:0;display:flex;flex-direction:row}
 
-  /* ---- LEFT: the map panel ---- */
+  /* ---- LEFT: the map panel, now the dominant half of the screen ---- */
   .left{
-    width:45%;height:100%;
+    width:68%;height:100%;
     padding:var(--pad-y) calc(var(--pad-x)*.6) var(--pad-y) var(--pad-x);
     display:flex;flex-direction:column;
   }
   #svg{flex:1;width:100%;min-height:0;display:block}
 
-  /* ---- diagnostics console carved out of the map's lower strip ---- */
+  /* ---- diagnostics: one line across the full width of the panel ---- */
   .debug{
-    flex:0 0 var(--dbg-h,120px);
+    flex:0 0 auto;
     border-top:calc(var(--seam-h)*2) solid var(--l);
-    margin-top:calc(var(--pad-y)*.4);
-    padding-top:calc(var(--pad-y)*.55);
+    padding:calc(var(--pad-y)*.5) var(--pad-x) calc(var(--pad-y)*.6);
     font-family:ui-monospace,"SF Mono",Menlo,Consolas,monospace;
     font-size:var(--dbg-fs,13px);
-    line-height:1.5;
+    line-height:1.45;
     letter-spacing:.01em;
     color:var(--l);
-    white-space:pre;
-    overflow:hidden;
+    display:flex;justify-content:space-between;gap:2em;
+    white-space:pre;overflow:hidden;
   }
+  .debug .seg{display:flex;gap:1.6em}
+  .debug b{color:var(--w);font-weight:600}
   .debug .bar{color:var(--w)}
   .debug .emg{color:var(--w);font-weight:700}
 
   /* ---- RIGHT: the split-flap panel ---- */
   .right{
-    width:55%;height:100%;
-    padding:var(--pad-y) var(--pad-x);
+    width:32%;height:100%;
+    padding:var(--pad-y) var(--pad-x) var(--pad-y) calc(var(--pad-x)*.7);
     display:flex;flex-direction:column;
     border-left:calc(var(--seam-h)*2) solid var(--l);
   }
 
-  /* ---- header ---- */
+  /* ---- header, spanning the whole panel ---- */
   header{
+    flex:0 0 auto;
     display:flex;justify-content:space-between;align-items:baseline;
-    border-bottom:calc(var(--seam-h)*2) solid var(--l);
-    padding-bottom:calc(var(--pad-y)*.7);margin-bottom:calc(var(--pad-y)*.7);
+    border-bottom:calc(var(--seam-h)*2) solid var(--w);
+    padding:calc(var(--pad-y)*.6) var(--pad-x) calc(var(--pad-y)*.55);
   }
   .brand{font-size:var(--brand-fs);font-weight:600;letter-spacing:.12em;color:var(--w)}
   .brand small{color:var(--l);font-weight:500;letter-spacing:.18em;font-size:calc(var(--brand-fs)*.55);margin-left:.5em}
@@ -105,7 +115,11 @@
 
   /* ---- the board ---- */
   #board{flex:1;display:flex;flex-direction:column;justify-content:space-between}
-  .row{display:flex;gap:var(--col-gap)}
+  /* Each row stacks: airline + origin on a text line, split-flap tiles below.
+     The airline is no longer a column of its own — at 32% width the tiles
+     need the full row. */
+  .row{display:flex;flex-direction:column;gap:calc(var(--tile-h)*.10)}
+  .flaps{display:flex;gap:var(--col-gap)}
   .grp{display:flex;gap:var(--tile-gap)}
   .tile{
     width:var(--tile-w);height:var(--tile-h);
@@ -125,21 +139,19 @@
   .tile.blank{color:var(--d)}          /* empty flap */
   .tile.dim{color:var(--l)}            /* secondary info flaps */
 
-  /* airline: de-emphasised plain text, no split-flap tiles.
-     Two lines — airline name, then the origin city + country in full. */
-  .airline{
-    display:flex;flex-direction:column;justify-content:center;
-    font-size:var(--airline-fs);line-height:1.08;
-    letter-spacing:.02em;color:var(--l);overflow:hidden;
+  /* airline + origin: one de-emphasised text line above each row's tiles */
+  .meta{
+    display:flex;align-items:baseline;gap:.4em;
+    font-size:var(--airline-fs);line-height:1.1;
+    letter-spacing:.02em;color:var(--l);
+    white-space:nowrap;overflow:hidden;
   }
-  .airline .nm{
-    font-weight:600;text-transform:uppercase;
-    white-space:nowrap;overflow:hidden;text-overflow:ellipsis;
+  .meta .nm{font-weight:600;text-transform:uppercase;color:var(--w);flex:0 0 auto}
+  .meta .sub{
+    font-weight:400;opacity:.9;
+    overflow:hidden;text-overflow:ellipsis;
   }
-  .airline .sub{
-    font-size:.82em;font-weight:400;color:var(--l);opacity:.85;
-    white-space:nowrap;overflow:hidden;text-overflow:ellipsis;
-  }
+  .row.blank .meta{visibility:hidden}
 
   /* ---- vertical-trend glyph (climb/descent) on the airline sub-line ---- */
   .trend{
@@ -165,63 +177,64 @@
     font-size:calc(var(--brand-fs)*.6);
   }
 
-  /* ---- footer ---- */
-  footer{
-    border-top:var(--seam-h) solid var(--d);
-    margin-top:calc(var(--pad-y)*.7);padding-top:calc(var(--pad-y)*.55);
-    display:flex;justify-content:space-between;
-    font-size:var(--label-fs);letter-spacing:.2em;color:var(--l);text-transform:uppercase;
+  /* ---- header meta: view cone + in-view count, alongside battery ---- */
+  .hdr-meta{
+    font-size:calc(var(--brand-fs)*.5);letter-spacing:.14em;
+    color:var(--l);text-transform:uppercase;white-space:nowrap;
   }
 </style>
 </head>
 <body>
-  <div class="left">
-    <svg id="svg" preserveAspectRatio="xMidYMid meet"></svg>
-    <div class="debug" id="debug"></div>
+  <header>
+    <div class="brand">OVERHEAD</div>
+    <div class="hdr-right">
+      <div class="batt" id="batt"></div>
+      <div class="hdr-meta" id="hdr-meta">135° SE · 5 KM</div>
+      <div class="clock" id="clock">16:42</div>
+    </div>
+  </header>
+  <div class="main">
+    <div class="left">
+      <svg id="svg" preserveAspectRatio="xMidYMid meet"></svg>
+    </div>
+    <div class="right">
+      <div id="emerg-banner"></div>
+      <div class="cols" id="cols"></div>
+      <div id="board"></div>
+    </div>
   </div>
-  <div class="right">
-    <header>
-      <div class="brand">OVERHEAD</div>
-      <div class="hdr-right">
-        <div class="batt" id="batt"></div>
-        <div class="clock" id="clock">16:42</div>
-      </div>
-    </header>
-    <div id="emerg-banner"></div>
-    <div class="cols" id="cols"></div>
-    <div id="board"></div>
-    <footer>
-      <span id="foot-l">WINDOW WATCH · 135° SE · 5 KM</span>
-      <span id="foot-r">IN VIEW 0</span>
-    </footer>
-  </div>
+  <div class="debug" id="debug"></div>
 
 <script>
-/* Column layout for the split-flap list. Each: [label, width-in-tiles, kind, dim?]
-   kind "text" = de-emphasised plain airline text; "tile" = split-flap tiles.
-   Flight-number (callsign) and flight-level columns are gone on purpose —
-   the user only cares about the route, not the flight id. */
-const COLS=[["AIRLINE",11,"text",false],
-            ["FROM",3,"tile",false],
-            ["TO",  3,"tile",false],
-            ["TYPE",4,"tile",true ],
-            ["ETA", 4,"tile",false]];
+/* Column layout for the split-flap list. Each: [label, width-in-tiles, dim?]
+   The airline now rides above each row as plain text rather than occupying a
+   column, and the aircraft type is gone — the flight number identifies the
+   flight better and needs the width the type column used to hold. Both ends
+   of the route stay: with one mixed list, FROM and TO are the only way to
+   tell an inbound from an outbound. */
+const COLS=[["FLIGHT",6,false],
+            ["FROM",  3,false],
+            ["TO",    3,false],
+            ["ETA",   4,false]];
 let ROWS=5;   /* recomputed from the viewport by layout() */
 
-/* Size the split-flap board to fit the RIGHT panel (55% of the viewport):
+/* Size the split-flap board to fit the RIGHT panel (32% of the viewport):
    derive tile size from that width so all columns fit, then fill the panel
    height with as many split-flap rows as it takes. */
 function layout(){
   const set=document.documentElement.style;
   const W=window.innerWidth, H=window.innerHeight;
-  const rightW = W*0.55;                                 // right panel width
+  const rightW = W*0.32;                                 // right panel width
   const nCols   = COLS.reduce((a,c)=>a+c[1],0);          // tiles across
   const nGroups = COLS.length;                            // column groups
   const nTileGap= COLS.reduce((a,c)=>a+c[1]-1,0);        // gaps within groups
   const padX = Math.round(rightW*0.03);
-  // width budget: tileW*nCols + (0.1*tileW)*nTileGap + (0.55*tileW)*(nGroups-1)
+  // width budget: tileW*nCols + (0.1*tileW)*nTileGap + (0.55*tileW)*(nGroups-1).
+  // The panel's own padding is padX right + 0.7*padX left; reserve that plus a
+  // few px for the left border and sub-pixel rounding across 16 tiles, or the
+  // last ETA flap gets clipped by the panel edge.
   const denom = nCols + 0.1*nTileGap + 0.55*(nGroups-1);
-  const tileW = (rightW - 2*padX) / denom;
+  const tileW = (rightW - padX*1.7 - 8) / denom;
   const tileH = tileW*2.3;
   const padY  = Math.round(H*0.025);
   const labelFs = Math.max(8, Math.round(tileW*0.62));
@@ -234,26 +247,31 @@ function layout(){
   set.setProperty("--brand-fs", Math.round(tileH*0.5)+"px");
   set.setProperty("--label-fs", labelFs+"px");
   set.setProperty("--tile-fs", Math.round(tileH*0.58)+"px");
-  set.setProperty("--airline-fs", Math.max(10, Math.round(tileH*0.30))+"px");
+  const metaFs = Math.max(10, Math.round(tileH*0.30));
+  set.setProperty("--airline-fs", metaFs+"px");
   set.setProperty("--seam-h", Math.max(1, Math.round(tileH*0.022))+"px");
-  // diagnostics strip: carve ~14% off the bottom of the map panel
-  const leftW = W*0.45;
-  set.setProperty("--dbg-h",  Math.round(H*0.14)+"px");
-  set.setProperty("--dbg-fs", Math.max(9, Math.min(22, Math.round(leftW*0.024)))+"px");
-  // how many rows fit once header / column labels / footer are accounted for
-  const chrome = padY*5 + tileH + labelFs*4.2;
-  const rowStride = tileH*1.22;
-  ROWS = Math.max(1, Math.min(24, Math.floor((H - chrome) / rowStride)));
+  // diagnostics: a single line spanning the full panel width
+  const dbgFs = Math.max(9, Math.min(24, Math.round(W*0.0115)));
+  set.setProperty("--dbg-fs", dbgFs+"px");
+  // Rows are meta line + tiles stacked, so the stride is taller than a tile.
+  // Budget the header and the diagnostics line out of the panel height first.
+  const brandFs  = Math.round(tileH*0.5);
+  const headerH  = padY*1.15 + brandFs*1.45;
+  const debugH   = padY*1.1 + dbgFs*1.45;
+  const chrome   = padY*2 + labelFs*2.4;      // right-panel padding + col labels
+  const rowStride = tileH + metaFs*1.15 + tileH*0.10 + tileH*0.16;
+  ROWS = Math.max(1, Math.min(24,
+    Math.floor((H - headerH - debugH - chrome) / rowStride)));
 }
 
 /* Fallback sample — same shape as /api/board (config + geo + flights[]) so
    the file previews standalone. e = km EAST of home, n = km NORTH (neg = south);
    the Thames + landmarks sit south of the flat, matching the real backend. */
 const SAMPLE={
-  config:{bearing:135.0, fov:145.0, range_km:25.0, predict_range_km:30.0,
+  config:{bearing:135.0, fov:145.0, range_km:5.0, predict_range_km:30.0,
     map_range_km:20.0, horizon_min:4.0,
     battery:{voltage:3.98, percent:77, rssi:-61},
-    debug:{source:"ADSB+FR24", n_scan:318, n_board:6, n_held:2, n_enriched:6,
+    debug:{source:"ADSB+FR24", n_scan:318, n_board:8, n_held:2, n_enriched:8,
       fetched_at:Date.now()/1000-4, error:null, fr24:true,
       credits_used:120, credits_est:48, credits_cap:29000},
     geo:{
@@ -271,33 +289,33 @@ const SAMPLE={
     }
   },
   flights:[
-    {callsign:"BAW23", airline:"BRITISH AIRWAYS", type:"A21N",
-     in_view:true, eta_min:0, bearing_deg:168.0, dist_km:5.2, track_deg:270,
+    {callsign:"BAW23", flight_no:"BA23", airline:"BRITISH AIRWAYS", type:"A21N",
+     in_view:true, eta_min:0, bearing_deg:150.0, dist_km:3.1, track_deg:270,
      alt_ft:5900, vs_fpm:-820, squawk:"7700", eta:"2026-07-24T16:47:00Z",
      origin:{iata:"CDG",city:"Paris",country:"FR"}, destination:{iata:"LHR",country:"GB"}},
-    {callsign:"CFE21B", airline:"BA CITYFLYER", type:"E190",
-     in_view:true, eta_min:0, bearing_deg:200.0, dist_km:8.4, track_deg:305,
+    {callsign:"CFE21B", flight_no:"BA8721", airline:"BA CITYFLYER", type:"E190",
+     in_view:true, eta_min:0, bearing_deg:118.0, dist_km:4.2, track_deg:305,
      alt_ft:5200, vs_fpm:1450, squawk:"6142", eta:"2026-07-24T16:49:00Z",
      origin:{iata:"DUB",city:"Dublin",country:"IE"}, destination:{iata:"LCY",country:"GB"}},
-    {callsign:"KLM43W", airline:"KLM", type:"B738",
-     in_view:false, eta_min:3.0, bearing_deg:150, dist_km:17.5, track_deg:322,
+    {callsign:"KLM43W", flight_no:"KL1043", airline:"KLM", type:"B738",
+     in_view:false, eta_min:3.0, bearing_deg:150, dist_km:9.5, track_deg:322,
      alt_ft:9000, vs_fpm:120, squawk:"2000", eta:"2026-07-24T16:52:00Z",
      origin:{iata:"AMS",city:"Amsterdam",country:"NL"}, destination:{iata:"LHR",country:"GB"}},
-    {callsign:"VIR5F", airline:"VIRGIN ATLANTIC", type:"A35K",
-     in_view:false, eta_min:5.0, bearing_deg:132, dist_km:42.0, track_deg:300,
+    {callsign:"VIR5F", flight_no:"VS5", airline:"VIRGIN ATLANTIC", type:"A35K",
+     in_view:false, eta_min:5.0, bearing_deg:132, dist_km:13.0, track_deg:300,
      alt_ft:12000, vs_fpm:2200, squawk:null, eta:"2026-07-24T16:54:00Z",
      origin:{iata:"JFK",city:"New York",country:"US"}, destination:{iata:"LHR",country:"GB"}},
-    {callsign:"EZY31KG", airline:"EASYJET", type:"A320",
-     in_view:false, eta_min:6.0, bearing_deg:212, dist_km:55.0, track_deg:40,
+    {callsign:"EZY31KG", flight_no:"U28703", airline:"EASYJET", type:"A320",
+     in_view:false, eta_min:6.0, bearing_deg:212, dist_km:17.0, track_deg:40,
      alt_ft:14000, origin:{iata:"CDG",city:"Paris",country:"FR"}, destination:null},
-    {callsign:"DLH4XA", airline:"LUFTHANSA", type:"A21N",
-     in_view:false, eta_min:8.0, bearing_deg:240, dist_km:80.0, track_deg:70,
+    {callsign:"DLH4XA", flight_no:"LH906", airline:"LUFTHANSA", type:"A21N",
+     in_view:false, eta_min:8.0, bearing_deg:240, dist_km:21.0, track_deg:70,
      alt_ft:24000, origin:{iata:"FRA",city:"Frankfurt",country:"DE"}, destination:{iata:"LHR",country:"GB"}},
-    {callsign:"UAE7T", airline:"EMIRATES", type:"B77W",
-     in_view:false, eta_min:9.0, bearing_deg:110, dist_km:100.0, track_deg:298,
+    {callsign:"UAE7T", flight_no:"EK7", airline:"EMIRATES", type:"B77W",
+     in_view:false, eta_min:9.0, bearing_deg:110, dist_km:25.0, track_deg:298,
      alt_ft:28000, origin:{iata:"DXB",city:"Dubai",country:"AE"}, destination:{iata:"LHR",country:"GB"}},
-    {callsign:"LOT285", airline:"LOT POLISH", type:"B738",
-     in_view:false, eta_min:10.0, bearing_deg:60, dist_km:130.0, track_deg:200,
+    {callsign:"LOT285", flight_no:"LO285", airline:"LOT POLISH", type:"B738",
+     in_view:false, eta_min:10.0, bearing_deg:60, dist_km:28.0, track_deg:200,
      alt_ft:31000, origin:{iata:"WAW",city:"Warsaw",country:"PL"}, destination:{iata:"LHR",country:"GB"}},
   ]
 };
@@ -321,10 +339,12 @@ function originFull(f){
   const country=countryName(o.country);
   return city && country ? city+", "+country : (city||country||"");
 }
+/* The flight number (BA172) when FR24 enrichment supplied one, else the raw
+   ADS-B callsign (BAW172) — same flight, the identifier you'd hear on the
+   radio rather than the one on a boarding pass. */
+const flightNo=f=>String((f&&(f.flight_no||f.callsign))||"").toUpperCase();
 /* list ETA (split-flap): NOW / ~5M */
 const etaText=f=> (f.in_view || !f.eta_min || f.eta_min<=0) ? "NOW" : ("~"+Math.round(f.eta_min)+"M");
-/* map ETA (small label): NOW / ~5m */
-const etaMap=f=> (f.in_view || !f.eta_min || f.eta_min<=0) ? "NOW" : ("~"+Math.round(f.eta_min)+"m");
 
 /* emergency transponder squawks (octal) → meaning */
 const EMERG={"7500":"HIJACK","7600":"RADIO FAIL","7700":"EMERGENCY"};
@@ -340,38 +360,36 @@ function trendGlyph(f){
 }
 
 /* ---- diagnostics console (lower strip of the map panel) ---- */
-const padR=(s,n)=>{ s=String(s); return s.length>=n?s:s+" ".repeat(n-s.length); };
 function creditBar(p,n){
   const f=Math.max(0,Math.min(n,Math.round(p*n)));
   return "["+"█".repeat(f)+"░".repeat(n-f)+"]";
 }
+/* One line across the bottom: counters grouped left, health readouts right.
+   Full width fits everything that used to need three stacked lines. */
 function renderDebug(cfg){
   const el=document.getElementById("debug");
   const d=cfg&&cfg.debug;
   if(!d){ el.textContent="DIAG  —  no debug data"; return; }
-  const l1=`SRC ${padR(d.source||"?",10)} SCAN ${padR(d.n_scan,4)} BOARD ${padR(d.n_board,3)}`+
-           ` ENR ${padR(d.n_enriched,3)} HELD ${d.n_held||0}`;
-  let l2;
+  const left=[`SRC <b>${esc(d.source||"?")}</b>`,
+              `SCAN <b>${d.n_scan}</b>`,
+              `BOARD <b>${d.n_board}</b>`,
+              `HELD <b>${d.n_held||0}</b>`,
+              `ENR <b>${d.n_enriched}</b>`];
+  let fr24;
   if(d.fr24===false){
-    l2=`FR24 off`;
+    fr24=`FR24 <b>off</b>`;
   }else{
     const cap=d.credits_cap||0;
     const used=(d.credits_used!=null)?d.credits_used:d.credits_est;
     const pct=cap?used/cap:0;
-    l2=`FR24 ${used} / ${cap} cr `+
-       `<span class="bar">${creditBar(pct,10)}</span> ${(pct*100).toFixed(1)}%`;
+    fr24=`FR24 <b>${used}</b>/${cap} <span class="bar">${creditBar(pct,10)}</span> `+
+         `${(pct*100).toFixed(1)}%`;
   }
   const age=(d.fetched_at!=null)?Math.max(0,Math.round(Date.now()/1000-d.fetched_at)):"?";
-  l2=padR2(l2)+`  AGE ${age}s`;
-  const err=(d.error==null||d.error==="")?"—":String(d.error);
-  const l3=`ERR ${err}`;
-  el.innerHTML=[l1,l2,l3].join("\n");
-}
-/* pad the (possibly HTML-bearing) credits string to a fixed *visible* width */
-function padR2(html){
-  const vis=html.replace(/<[^>]*>/g,"").length;
-  const want=30;
-  return html+(vis<want?" ".repeat(want-vis):"");
+  const err=(d.error==null||d.error==="")?"—":esc(String(d.error));
+  const right=[fr24, `AGE <b>${age}s</b>`, `ERR <b>${err}</b>`];
+  el.innerHTML=`<span class="seg">${left.map(s=>`<span>${s}</span>`).join("")}</span>`+
+               `<span class="seg">${right.map(s=>`<span>${s}</span>`).join("")}</span>`;
 }
 
 function fit(text,n){
@@ -385,37 +403,31 @@ function tiles(text,n,dim){
   ).join("");
 }
 
-/* CSS width of a column group that is `n` tiles wide */
-function colWidth(n){
-  return `calc(${n} * (var(--tile-w) + var(--tile-gap)) - var(--tile-gap))`;
-}
-
 function rowHtml(f){
-  // per-column tile values (AIRLINE is handled specially as two text lines)
+  const emg=emergOf(f);
   const vals = f ? [
-    null,                        // AIRLINE (name + city/country, below)
-    iata(f.origin),              // FROM  origin IATA
-    iata(f.destination),         // TO    destination IATA
-    f.type||"",                  // TYPE  aircraft type
+    flightNo(f),                 // FLIGHT  IATA flight number, else callsign
+    iata(f.origin),              // FROM    origin IATA
+    iata(f.destination),         // TO      destination IATA
     etaText(f),                  // ETA
   ] : COLS.map(()=>"");
-  const emg=emergOf(f);
-  return `<div class="row${emg?" emerg":""}">`+COLS.map(([label,n,kind,dim],i)=>{
-    if(kind==="text"){
-      if(!f) return `<div class="grp airline" style="width:${colWidth(n)}"></div>`;
-      const nm=esc(fit((f.airline||f.type_desc||"").toUpperCase(), n*3).trim());
-      const sub=esc(originFull(f));
-      // emergency rows carry a bold inverted badge instead of the origin line;
-      // otherwise the origin line is prefixed with the climb/descent glyph.
-      const subHtml = emg
-        ? `<div class="sub"><span class="emerg-badge">! ${esc(f.squawk)} ${esc(emg)}</span></div>`
-        : ((sub||f.vs_fpm!=null)?`<div class="sub">${trendGlyph(f)}${sub}</div>`:"");
-      return `<div class="grp airline" style="width:${colWidth(n)}">`+
-             `<div class="nm">${nm}</div>`+subHtml+
-             `</div>`;
-    }
-    return `<div class="grp">${tiles(vals[i],n,dim)}</div>`;
-  }).join("")+`</div>`;
+  // meta line: climb/descent glyph, airline, origin city — or, on an
+  // emergency, a bold inverted badge in place of the origin.
+  let meta = "";
+  if(f){
+    const nm=esc(fit((f.airline||f.type_desc||"").toUpperCase(), 26).trim());
+    const sub = emg
+      ? `<span class="emerg-badge">! ${esc(f.squawk)} ${esc(emg)}</span>`
+      : esc(originFull(f));
+    meta = `<div class="meta">${trendGlyph(f)}<span class="nm">${nm}</span>`+
+           (sub?`<span class="sub">${emg?"":"· "}${sub}</span>`:"")+`</div>`;
+  } else {
+    meta = `<div class="meta"><span class="nm">·</span></div>`;
+  }
+  const flaps = COLS.map(([label,n,dim],i)=>
+    `<div class="grp">${tiles(vals[i],n,dim)}</div>`).join("");
+  return `<div class="row${emg?" emerg":""}${f?"":" blank"}">`+
+         meta+`<div class="flaps">${flaps}</div></div>`;
 }
 
 /* ---------------- LEFT PANEL: the vector map ---------------- */
@@ -549,9 +561,9 @@ function buildMap(cfg, flights){
     const inv=f.in_view;
     const [ax,ay]=projBD(f.bearing_deg, f.dist_km);
     const onPanel = ax>=minX && ax<=maxX && ay>=minY && ay<=maxY && f.dist_km<=mapRange;
-    // label: origin IATA + ETA, fall back to type, else nothing
-    const oi=iata(f.origin);
-    const lab = oi ? oi+" "+etaMap(f) : (f.type ? f.type+" "+etaMap(f) : "");
+    // label: the flight number — short enough not to collide now that the
+    // map is bigger and carries more traffic. The ETA lives on the board.
+    const lab = flightNo(f);
 
     if(onPanel){
       // heading arrow along track_deg
@@ -649,12 +661,12 @@ function draw(data){
     return `<span style="width:${w}">${label}</span>`;
   }).join("");
 
+  // view cone + counts now ride in the header, so the board runs to the edge
   const nView=flights.filter(f=>f.in_view).length;
   const nIn=flights.length-nView;
-  document.getElementById("foot-r").textContent=
-    `IN VIEW ${nView} · ${nIn} INBOUND`;
-  document.getElementById("foot-l").textContent=
-    `WINDOW WATCH · ${Math.round(cfg.bearing)}° ${cardinal(cfg.bearing)} · ${Math.round(cfg.range_km)} KM`;
+  document.getElementById("hdr-meta").textContent=
+    `${Math.round(cfg.bearing)}° ${cardinal(cfg.bearing)} · ${Math.round(cfg.range_km)} KM`+
+    ` · IN VIEW ${nView} · ${nIn} INBOUND`;
 
   const now=new Date();
   document.getElementById("clock").textContent=
