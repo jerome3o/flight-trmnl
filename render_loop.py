@@ -8,6 +8,13 @@ TRMNL's own ImageMagick guide), and the result is atomically swapped into
 place. serve.py's /api/display hands the device a content-hash filename, so a
 render identical to the last one costs the e-ink nothing.
 
+Chrome counts browser chrome inside --window-size, so the viewport the board
+lays itself out against is shorter than the panel and the render stops short,
+leaving a blank strip along the bottom (87px at 1872x1404). The shortfall is
+measured once at startup and added to the requested height, then the
+screenshot is cropped back to the panel's exact size — which the firmware
+requires and will reject the image without.
+
 Match RENDER_WIDTH/HEIGHT/DEPTH to your device — the firmware rejects any
 image that isn't the panel's exact size and does not scale:
   · TRMNL X  (10.3"): 1872x1404, 4bit  (16-level greyscale PNG)  ← default
@@ -23,6 +30,7 @@ Environment:
 """
 
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -43,8 +51,44 @@ MAX_IMAGE_BYTES = int(os.environ.get("RENDER_MAX_BYTES", "750000"))
 CHROME_CANDIDATES = ["chromium", "chromium-browser", "google-chrome",
                      "google-chrome-stable", "chrome"]
 CHROME_FLAGS = ["--no-sandbox", "--disable-gpu", "--disable-dev-shm-usage",
-                "--hide-scrollbars", f"--window-size={WIDTH},{HEIGHT}",
+                "--hide-scrollbars",
                 "--force-device-scale-factor=1", "--virtual-time-budget=4000"]
+
+# Headless Chrome counts browser chrome inside --window-size, so the viewport
+# it hands the page is shorter than what we asked for — the board lays itself
+# out against 100vh and stops short of the panel, leaving a blank strip along
+# the bottom (87px at 1872x1404 on Debian's chromium). Measured once at
+# startup and added back to the requested height; publish() then crops the
+# screenshot to the panel's exact size, so the firmware still gets what it
+# demands however Chrome behaves.
+WINDOW_PAD = 0
+
+
+def measure_window_pad():
+    """How many pixels shorter than --window-size the viewport comes out."""
+    with tempfile.NamedTemporaryFile("w", suffix=".html", delete=False) as fh:
+        fh.write("<html><body><script>"
+                 "document.title='VP'+window.innerHeight"
+                 "</script></body></html>")
+        probe = fh.name
+    try:
+        r = subprocess.run([CHROME, "--headless=new", *CHROME_FLAGS,
+                            f"--window-size={WIDTH},{HEIGHT}", "--dump-dom",
+                            "file://" + probe],
+                           capture_output=True, timeout=60)
+        m = re.search(rb"VP(\d+)", r.stdout)
+        if m:
+            pad = HEIGHT - int(m.group(1))
+            # sanity-bound it: a wild reading means the probe misfired
+            return pad if 0 <= pad < HEIGHT // 3 else 0
+    except Exception as e:
+        log(f"viewport probe failed ({e}); rendering without compensation")
+    finally:
+        try:
+            os.unlink(probe)
+        except OSError:
+            pass
+    return 0
 
 
 def log(msg):
@@ -62,15 +106,22 @@ CHROME = find(CHROME_CANDIDATES)
 MAGICK = find(["magick"]) or find(["convert"])
 
 
+# Force the panel's exact pixel size: crop off the compensation padding, and
+# pad with white if a render ever comes back short. The firmware rejects any
+# image that isn't the panel's exact size, so this is the guarantee.
+FIT = ["-crop", f"{WIDTH}x{HEIGHT}+0+0", "+repage",
+       "-background", "white", "-extent", f"{WIDTH}x{HEIGHT}"]
+
+
 def quantize(src, dst):
     """Reduce the screenshot to the TRMNL greyscale depth the panel expects.
     4-bit: 16 greys (TRMNL X); 2-bit: 4 greys; 1-bit: black/white (legacy).
     Recipes follow TRMNL's ImageMagick guide (posterize + -depth per mode)."""
     if DEPTH == "1bit":
-        cmd = [MAGICK, src, "-dither", "FloydSteinberg",
+        cmd = [MAGICK, src, *FIT, "-dither", "FloydSteinberg",
                "-remap", "pattern:gray50", "-depth", "1", "-strip", f"png:{dst}"]
     elif DEPTH == "4bit":
-        cmd = [MAGICK, src, "-colorspace", "Gray", "-dither", "FloydSteinberg",
+        cmd = [MAGICK, src, *FIT, "-colorspace", "Gray", "-dither", "FloydSteinberg",
                "-posterize", "16", "-alpha", "off", "-depth", "4",
                "-strip", f"png:{dst}"]
     else:  # 2bit
@@ -79,7 +130,7 @@ def quantize(src, dst):
         subprocess.run([MAGICK, "-size", "4x1",
                         "xc:#000000", "xc:#555555", "xc:#aaaaaa", "xc:#ffffff",
                         "+append", "-type", "Palette", cmap], check=True)
-        cmd = [MAGICK, src, "-dither", "FloydSteinberg", "-remap", cmap,
+        cmd = [MAGICK, src, *FIT, "-dither", "FloydSteinberg", "-remap", cmap,
                "-define", "png:bit-depth=2", "-define", "png:color-type=0",
                "-strip", f"png:{dst}"]
     subprocess.run(cmd, check=True, capture_output=True)
@@ -87,7 +138,12 @@ def quantize(src, dst):
 
 def screenshot(dst):
     for headless in ("--headless=new", "--headless"):
-        cmd = [CHROME, headless, *CHROME_FLAGS, f"--screenshot={dst}", BOARD_URL]
+        # WINDOW_PAD was measured against --headless=new; the legacy mode has
+        # its own (usually zero) shortfall, so don't apply it there.
+        pad = WINDOW_PAD if headless == "--headless=new" else 0
+        cmd = [CHROME, headless, *CHROME_FLAGS,
+               f"--window-size={WIDTH},{HEIGHT + pad}",
+               f"--screenshot={dst}", BOARD_URL]
         r = subprocess.run(cmd, capture_output=True, timeout=60)
         if r.returncode == 0 and os.path.exists(dst) and os.path.getsize(dst) > 0:
             return True
@@ -137,6 +193,7 @@ def wait_for_server(tries=30):
 
 
 def main():
+    global WINDOW_PAD
     if not CHROME:
         log("no Chrome/Chromium found — renderer disabled "
             "(install chromium, or run outside docker without BYOS rendering)")
@@ -144,6 +201,10 @@ def main():
     if not MAGICK:
         log("ImageMagick not found — renderer disabled")
         sys.exit(0)
+    WINDOW_PAD = measure_window_pad()
+    if WINDOW_PAD:
+        log(f"viewport runs {WINDOW_PAD}px short of --window-size; "
+            f"requesting {HEIGHT + WINDOW_PAD}px so the board fills the panel")
     log(f"chrome={CHROME} magick={MAGICK} {WIDTH}x{HEIGHT} depth={DEPTH} "
         f"every {INTERVAL}s -> {OUT}")
     placeholder()
