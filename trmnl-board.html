@@ -218,10 +218,13 @@
    flight better and needs the width the type column used to hold. Both ends
    of the route stay: with one mixed list, FROM and TO are the only way to
    tell an inbound from an outbound. */
-const COLS=[["FLIGHT",6,false],
-            ["FROM",  3,false],
-            ["TO",    3,false],
-            ["ETA",   4,false]];
+/* [label, width-in-tiles, dim?, right-aligned?] — ETA is right-aligned so the
+   spare flap for a second digit sits on the LEFT, keeping the M in ~10M and
+   ~3M in the same column instead of ragged. */
+const COLS=[["FLIGHT",6,false,false],
+            ["FROM",  3,false,false],
+            ["TO",    3,false,false],
+            ["ETA",   4,false,true ]];
 let ROWS=5;   /* recomputed from the viewport by layout() */
 
 /* Size the split-flap board to fit the RIGHT panel (32% of the viewport):
@@ -399,13 +402,14 @@ function renderDebug(cfg){
                `<span class="seg">${right.map(s=>`<span>${s}</span>`).join("")}</span>`;
 }
 
-function fit(text,n){
+function fit(text,n,right){
   text=(text||"").toUpperCase().replace(/[^A-Z0-9 °\-~]/g," ");
-  return (text.length>n?text.slice(0,n):text.padEnd(n," "));
+  if(text.length>n) return text.slice(0,n);
+  return right ? text.padStart(n," ") : text.padEnd(n," ");
 }
 
-function tiles(text,n,dim){
-  return [...fit(text,n)].map(ch=>
+function tiles(text,n,dim,right){
+  return [...fit(text,n,right)].map(ch=>
     `<div class="tile ${ch===" "?"blank":dim?"dim":""}">${ch===" "?"·":ch}</div>`
   ).join("");
 }
@@ -433,8 +437,8 @@ function rowHtml(f){
   } else {
     meta = `<div class="meta"><span class="nm">·</span></div>`;
   }
-  const flaps = COLS.map(([label,n,dim],i)=>
-    `<div class="grp">${tiles(vals[i],n,dim)}</div>`).join("");
+  const flaps = COLS.map(([label,n,dim,right],i)=>
+    `<div class="grp">${tiles(vals[i],n,dim,right)}</div>`).join("");
   return `<div class="row${emg?" emerg":""}${f?"":" blank"}">`+
          meta+`<div class="flaps">${flaps}</div></div>`;
 }
@@ -576,8 +580,9 @@ function buildMap(cfg, flights){
 
     if(onPanel){
       // heading arrow along track_deg
-      if(f.track_deg!=null){
-        const [dx,dy]=dirBD(f.track_deg);
+      const hasTrack = f.track_deg!=null;
+      const [dx,dy] = hasTrack ? dirBD(f.track_deg) : [0,-1];
+      if(hasTrack){
         P.push(`<line x1="${ax.toFixed(1)}" y1="${ay.toFixed(1)}" x2="${(ax+dx*arrowLen).toFixed(1)}" `+
                `y2="${(ay+dy*arrowLen).toFixed(1)}" stroke="${inv?dark:grey}" `+
                `stroke-width="${(strokeW*1.6).toFixed(2)}" marker-end="url(#${inv?"ah":"ahg"})"/>`);
@@ -589,9 +594,24 @@ function buildMap(cfg, flights){
       if(emergOf(f))
         P.push(`<circle cx="${ax.toFixed(1)}" cy="${ay.toFixed(1)}" r="${(markR*1.9).toFixed(1)}" fill="none" stroke="${dark}" stroke-width="${(strokeW*2.6).toFixed(2)}"/>`);
       if(lab){
-        const anchor = ax>W-W*0.28?"end":"start";
-        const ox = anchor==="end"?-(markR+3):(markR+3);
-        P.push(`<text x="${(ax+ox).toFixed(1)}" y="${(ay-markR-2).toFixed(1)}" text-anchor="${anchor}" `+
+        // Trail the label BEHIND the aircraft, opposite its heading, so it can
+        // never sit under the arrow it belongs to. Fixed above-right placement
+        // collided head-on with anything tracking up and to the right.
+        const off = markR + fs*0.55;
+        const bx = ax - dx*off, by = ay - dy*off;
+        let anchor, lx = bx, ly;
+        if(Math.abs(dx) >= Math.abs(dy)){
+          anchor = dx>0 ? "end" : "start";   // behind is left / right
+          ly = by + fs*0.32;                 // sit on the marker's centreline
+        }else{
+          anchor = "middle";                 // behind is above / below
+          ly = dy>0 ? by - fs*0.10 : by + fs*0.78;
+        }
+        // flip rather than run off the panel edge
+        const half = fs*0.40*String(lab).length;
+        if(anchor==="end"   && lx-half < minX){ anchor="start";  lx = ax+off; }
+        if(anchor==="start" && lx+half > maxX){ anchor="end";    lx = ax-off; }
+        P.push(`<text x="${lx.toFixed(1)}" y="${ly.toFixed(1)}" text-anchor="${anchor}" `+
                `font-family="Oswald,sans-serif" font-weight="${inv?"600":"500"}" `+
                `font-size="${(fs*0.66).toFixed(1)}" fill="${inv?dark:grey}">${esc(lab)}</text>`);
       }
@@ -668,9 +688,9 @@ function draw(data){
   const rows=[];
   for(let i=0;i<ROWS;i++) rows.push(rowHtml(flights[i]||null));
   document.getElementById("board").innerHTML=rows.join("");
-  document.getElementById("cols").innerHTML=COLS.map(([label,n])=>{
+  document.getElementById("cols").innerHTML=COLS.map(([label,n,dim,right])=>{
     const w=`calc(${n} * (var(--tile-w) + var(--tile-gap)) - var(--tile-gap))`;
-    return `<span style="width:${w}">${label}</span>`;
+    return `<span style="width:${w}${right?";text-align:right":""}">${label}</span>`;
   }).join("");
 
   // view cone + counts now ride in the header, so the board runs to the edge
