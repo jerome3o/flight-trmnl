@@ -8,11 +8,11 @@
   map and board side by side beneath it, and a diagnostics line along the
   bottom.
 
-  · LEFT  (68%): a view-up radar-style vector map centred on home — view
+  · LEFT  (64%): a view-up radar-style vector map centred on home — view
     cone, range rings, Thames, landmarks, compass rose, home marker, and each
     aircraft plotted at its (bearing, distance) with a heading arrow and its
     flight number.
-  · RIGHT (32%): one split-flap list — FLIGHT · FROM · TO · ETA, with the
+  · RIGHT (36%): one split-flap list — FLIGHT · FROM · TO · ETA, with the
     airline and origin as a text line above each row's tiles.
 
   · Resolution-independent: the layout fills the viewport, so the same file
@@ -59,7 +59,7 @@
 
   /* ---- LEFT: the map panel, now the dominant half of the screen ---- */
   .left{
-    width:68%;height:100%;
+    width:64%;height:100%;
     padding:var(--pad-y) calc(var(--pad-x)*.6) var(--pad-y) var(--pad-x);
     display:flex;flex-direction:column;
   }
@@ -68,24 +68,28 @@
   /* ---- diagnostics: one line across the full width of the panel ---- */
   .debug{
     flex:0 0 auto;
-    border-top:calc(var(--seam-h)*2) solid var(--l);
-    padding:calc(var(--pad-y)*.5) var(--pad-x) calc(var(--pad-y)*.6);
+    border-top:calc(var(--seam-h)*3) solid var(--w);
+    padding:calc(var(--pad-y)*.55) var(--pad-x) calc(var(--pad-y)*.75);
     font-family:ui-monospace,"SF Mono",Menlo,Consolas,monospace;
     font-size:var(--dbg-fs,13px);
     line-height:1.45;
     letter-spacing:.01em;
     color:var(--l);
-    display:flex;justify-content:space-between;gap:2em;
+    display:flex;align-items:baseline;justify-content:space-between;gap:1.4em;
     white-space:pre;overflow:hidden;
   }
-  .debug .seg{display:flex;gap:1.6em}
+  .debug .seg{display:flex;gap:1.5em}
+  /* label so the strip reads as the diagnostics console, not a stray line */
+  .debug .tag{
+    font-weight:700;color:var(--w);letter-spacing:.18em;flex:0 0 auto;
+  }
   .debug b{color:var(--w);font-weight:600}
   .debug .bar{color:var(--w)}
   .debug .emg{color:var(--w);font-weight:700}
 
   /* ---- RIGHT: the split-flap panel ---- */
   .right{
-    width:32%;height:100%;
+    width:36%;height:100%;
     padding:var(--pad-y) var(--pad-x) var(--pad-y) calc(var(--pad-x)*.7);
     display:flex;flex-direction:column;
     border-left:calc(var(--seam-h)*2) solid var(--l);
@@ -116,7 +120,7 @@
   /* ---- the board ---- */
   #board{flex:1;display:flex;flex-direction:column;justify-content:space-between}
   /* Each row stacks: airline + origin on a text line, split-flap tiles below.
-     The airline is no longer a column of its own — at 32% width the tiles
+     The airline is no longer a column of its own — at 36% width the tiles
      need the full row. */
   .row{display:flex;flex-direction:column;gap:calc(var(--tile-h)*.10)}
   .flaps{display:flex;gap:var(--col-gap)}
@@ -147,6 +151,8 @@
     white-space:nowrap;overflow:hidden;
   }
   .meta .nm{font-weight:600;text-transform:uppercase;color:var(--w);flex:0 0 auto}
+  /* aircraft type — no longer a column of flaps, but still worth knowing */
+  .meta .ty{font-weight:600;color:var(--l);flex:0 0 auto;letter-spacing:.06em}
   .meta .sub{
     font-weight:400;opacity:.9;
     overflow:hidden;text-overflow:ellipsis;
@@ -212,10 +218,13 @@
    flight better and needs the width the type column used to hold. Both ends
    of the route stay: with one mixed list, FROM and TO are the only way to
    tell an inbound from an outbound. */
-const COLS=[["FLIGHT",6,false],
-            ["FROM",  3,false],
-            ["TO",    3,false],
-            ["ETA",   4,false]];
+/* [label, width-in-tiles, dim?, right-aligned?] — ETA is right-aligned so the
+   spare flap for a second digit sits on the LEFT, keeping the M in ~10M and
+   ~3M in the same column instead of ragged. */
+const COLS=[["FLIGHT",6,false,false],
+            ["FROM",  3,false,false],
+            ["TO",    3,false,false],
+            ["ETA",   4,false,true ]];
 let ROWS=5;   /* recomputed from the viewport by layout() */
 
 /* Size the split-flap board to fit the RIGHT panel (32% of the viewport):
@@ -224,7 +233,7 @@ let ROWS=5;   /* recomputed from the viewport by layout() */
 function layout(){
   const set=document.documentElement.style;
   const W=window.innerWidth, H=window.innerHeight;
-  const rightW = W*0.32;                                 // right panel width
+  const rightW = W*0.36;                                 // right panel width
   const nCols   = COLS.reduce((a,c)=>a+c[1],0);          // tiles across
   const nGroups = COLS.length;                            // column groups
   const nTileGap= COLS.reduce((a,c)=>a+c[1]-1,0);        // gaps within groups
@@ -388,17 +397,19 @@ function renderDebug(cfg){
   const age=(d.fetched_at!=null)?Math.max(0,Math.round(Date.now()/1000-d.fetched_at)):"?";
   const err=(d.error==null||d.error==="")?"—":esc(String(d.error));
   const right=[fr24, `AGE <b>${age}s</b>`, `ERR <b>${err}</b>`];
-  el.innerHTML=`<span class="seg">${left.map(s=>`<span>${s}</span>`).join("")}</span>`+
+  el.innerHTML=`<span class="tag">DIAG</span>`+
+               `<span class="seg">${left.map(s=>`<span>${s}</span>`).join("")}</span>`+
                `<span class="seg">${right.map(s=>`<span>${s}</span>`).join("")}</span>`;
 }
 
-function fit(text,n){
+function fit(text,n,right){
   text=(text||"").toUpperCase().replace(/[^A-Z0-9 °\-~]/g," ");
-  return (text.length>n?text.slice(0,n):text.padEnd(n," "));
+  if(text.length>n) return text.slice(0,n);
+  return right ? text.padStart(n," ") : text.padEnd(n," ");
 }
 
-function tiles(text,n,dim){
-  return [...fit(text,n)].map(ch=>
+function tiles(text,n,dim,right){
+  return [...fit(text,n,right)].map(ch=>
     `<div class="tile ${ch===" "?"blank":dim?"dim":""}">${ch===" "?"·":ch}</div>`
   ).join("");
 }
@@ -415,17 +426,19 @@ function rowHtml(f){
   // emergency, a bold inverted badge in place of the origin.
   let meta = "";
   if(f){
-    const nm=esc(fit((f.airline||f.type_desc||"").toUpperCase(), 26).trim());
+    const nm=esc(fit((f.airline||f.type_desc||"").toUpperCase(), 24).trim());
+    const ty=f.type?esc(String(f.type).toUpperCase()):"";
     const sub = emg
       ? `<span class="emerg-badge">! ${esc(f.squawk)} ${esc(emg)}</span>`
       : esc(originFull(f));
     meta = `<div class="meta">${trendGlyph(f)}<span class="nm">${nm}</span>`+
+           (ty?`<span class="ty">· ${ty}</span>`:"")+
            (sub?`<span class="sub">${emg?"":"· "}${sub}</span>`:"")+`</div>`;
   } else {
     meta = `<div class="meta"><span class="nm">·</span></div>`;
   }
-  const flaps = COLS.map(([label,n,dim],i)=>
-    `<div class="grp">${tiles(vals[i],n,dim)}</div>`).join("");
+  const flaps = COLS.map(([label,n,dim,right],i)=>
+    `<div class="grp">${tiles(vals[i],n,dim,right)}</div>`).join("");
   return `<div class="row${emg?" emerg":""}${f?"":" blank"}">`+
          meta+`<div class="flaps">${flaps}</div></div>`;
 }
@@ -567,8 +580,9 @@ function buildMap(cfg, flights){
 
     if(onPanel){
       // heading arrow along track_deg
-      if(f.track_deg!=null){
-        const [dx,dy]=dirBD(f.track_deg);
+      const hasTrack = f.track_deg!=null;
+      const [dx,dy] = hasTrack ? dirBD(f.track_deg) : [0,-1];
+      if(hasTrack){
         P.push(`<line x1="${ax.toFixed(1)}" y1="${ay.toFixed(1)}" x2="${(ax+dx*arrowLen).toFixed(1)}" `+
                `y2="${(ay+dy*arrowLen).toFixed(1)}" stroke="${inv?dark:grey}" `+
                `stroke-width="${(strokeW*1.6).toFixed(2)}" marker-end="url(#${inv?"ah":"ahg"})"/>`);
@@ -580,9 +594,24 @@ function buildMap(cfg, flights){
       if(emergOf(f))
         P.push(`<circle cx="${ax.toFixed(1)}" cy="${ay.toFixed(1)}" r="${(markR*1.9).toFixed(1)}" fill="none" stroke="${dark}" stroke-width="${(strokeW*2.6).toFixed(2)}"/>`);
       if(lab){
-        const anchor = ax>W-W*0.28?"end":"start";
-        const ox = anchor==="end"?-(markR+3):(markR+3);
-        P.push(`<text x="${(ax+ox).toFixed(1)}" y="${(ay-markR-2).toFixed(1)}" text-anchor="${anchor}" `+
+        // Trail the label BEHIND the aircraft, opposite its heading, so it can
+        // never sit under the arrow it belongs to. Fixed above-right placement
+        // collided head-on with anything tracking up and to the right.
+        const off = markR + fs*0.55;
+        const bx = ax - dx*off, by = ay - dy*off;
+        let anchor, lx = bx, ly;
+        if(Math.abs(dx) >= Math.abs(dy)){
+          anchor = dx>0 ? "end" : "start";   // behind is left / right
+          ly = by + fs*0.32;                 // sit on the marker's centreline
+        }else{
+          anchor = "middle";                 // behind is above / below
+          ly = dy>0 ? by - fs*0.10 : by + fs*0.78;
+        }
+        // flip rather than run off the panel edge
+        const half = fs*0.40*String(lab).length;
+        if(anchor==="end"   && lx-half < minX){ anchor="start";  lx = ax+off; }
+        if(anchor==="start" && lx+half > maxX){ anchor="end";    lx = ax-off; }
+        P.push(`<text x="${lx.toFixed(1)}" y="${ly.toFixed(1)}" text-anchor="${anchor}" `+
                `font-family="Oswald,sans-serif" font-weight="${inv?"600":"500"}" `+
                `font-size="${(fs*0.66).toFixed(1)}" fill="${inv?dark:grey}">${esc(lab)}</text>`);
       }
@@ -652,13 +681,16 @@ function buildMap(cfg, flights){
 function draw(data){
   const cfg=(data&&data.config)||SAMPLE.config;
   const flights=(data&&data.flights)||[];
+  // Diagnostics first: it is what you reach for when something else on this
+  // screen has gone wrong, so it must not be skipped by a throw further down.
+  renderDebug(cfg);
   // API already sorts in_view first, then eta; keep that order for the list
   const rows=[];
   for(let i=0;i<ROWS;i++) rows.push(rowHtml(flights[i]||null));
   document.getElementById("board").innerHTML=rows.join("");
-  document.getElementById("cols").innerHTML=COLS.map(([label,n])=>{
+  document.getElementById("cols").innerHTML=COLS.map(([label,n,dim,right])=>{
     const w=`calc(${n} * (var(--tile-w) + var(--tile-gap)) - var(--tile-gap))`;
-    return `<span style="width:${w}">${label}</span>`;
+    return `<span style="width:${w}${right?";text-align:right":""}">${label}</span>`;
   }).join("");
 
   // view cone + counts now ride in the header, so the board runs to the edge
@@ -693,7 +725,6 @@ function draw(data){
     eb.textContent="⚠ EMERGENCY "+emerg.map(f=>f.squawk).join(" ");
   }else{ eb.style.display="none"; eb.textContent=""; }
 
-  renderDebug(cfg);
   buildMap(cfg, flights);
 }
 
