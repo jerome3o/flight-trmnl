@@ -186,11 +186,12 @@ def airline_for(callsign, own_op):
 # each DB knows flights the others don't. Order via ROUTE_PROVIDERS env, e.g.
 # ROUTE_PROVIDERS=adsbdb,hexdb (that's the default). Set
 # DEBUG_ROUTES=1 to log every lookup to stderr.
-ROUTE_CACHE = {}     # callsign -> (origin, destination) or None (missed everywhere)
+ROUTE_CACHE = {}     # callsign -> route dict or None (missed everywhere)
 AIRPORT_CACHE = {}   # icao -> airport dict or None
 UA = {"User-Agent": "window-flights/1.0"}
 DEBUG_ROUTES = os.environ.get("DEBUG_ROUTES") == "1"
-MAX_NEW_LOOKUPS = 8  # new callsigns resolved per refresh; rest wait a cycle
+MAX_NEW_LOOKUPS = int(os.environ.get("ROUTE_MAX_NEW", "8"))  # per refresh
+ROUTE_BUDGET_S = float(os.environ.get("ROUTE_BUDGET_S", "8"))  # per refresh
 
 ADSBDB_URL = "https://api.adsbdb.com/v0/callsign/{cs}"
 HEXDB_ROUTE_URL = "https://hexdb.io/api/v1/route/icao/{cs}"
@@ -248,6 +249,19 @@ def _norm_airport(a, style):
 #      (origin, destination) on success, None on a clean miss,
 #      and raises on transport/format errors ----
 
+def _iata_flight_no(fr):
+    """IATA flight number (BA172) from an adsbdb flightroute.
+
+    callsign_iata is normally the whole IATA callsign, but handle the case of a
+    source returning only the numeric part by prefixing the airline's IATA
+    code — the airline object is in the same response either way."""
+    num = (fr.get("callsign_iata") or "").strip().upper()
+    if not num:
+        return None
+    code = ((fr.get("airline") or {}).get("iata") or "").strip().upper()
+    return code + num if (num[:1].isdigit() and code) else num
+
+
 def _p_adsbdb(cs, lat, lon):
     data = _get_json(ADSBDB_URL.format(cs=cs))
     if data is None:
@@ -255,8 +269,10 @@ def _p_adsbdb(cs, lat, lon):
     fr = data.get("response") if isinstance(data, dict) else None
     fr = fr.get("flightroute") if isinstance(fr, dict) else None
     if isinstance(fr, dict) and fr.get("origin") and fr.get("destination"):
-        return (_norm_airport(fr["origin"], "adsbdb"),
-                _norm_airport(fr["destination"], "adsbdb"))
+        return {"origin": _norm_airport(fr["origin"], "adsbdb"),
+                "destination": _norm_airport(fr["destination"], "adsbdb"),
+                "flight_no": _iata_flight_no(fr),
+                "airline": ((fr.get("airline") or {}).get("name")) or None}
     return None                           # e.g. {"response": "unknown callsign"}
 
 
@@ -288,7 +304,7 @@ def _p_hexdb(cs, lat, lon):
                                      "name": None, "city": None, "country": None}
     d = _hexdb_airport(codes[-1]) or {"icao": codes[-1], "iata": None,
                                       "name": None, "city": None, "country": None}
-    return (o, d)
+    return {"origin": o, "destination": d, "flight_no": None, "airline": None}
 
 
 def _p_adsblol(cs, lat, lon):
@@ -300,8 +316,9 @@ def _p_adsblol(cs, lat, lon):
             continue
         aps = item.get("_airports") or []
         if len(aps) >= 2:
-            return (_norm_airport(aps[0], "routeset"),
-                    _norm_airport(aps[-1], "routeset"))
+            return {"origin": _norm_airport(aps[0], "routeset"),
+                    "destination": _norm_airport(aps[-1], "routeset"),
+                    "flight_no": None, "airline": None}
     return None
 
 
@@ -333,18 +350,20 @@ def resolve_route(cs, lat, lon):
         if not result:
             _rlog(f"{name} {cs}: miss")
             continue
-        _rlog(f"{name} {cs}: {result[0].get('icao')} -> {result[1].get('icao')}")
+        _rlog(f"{name} {cs}: {result['origin'].get('icao')} -> "
+              f"{result['destination'].get('icao')}")
         if not ROUTE_STRICT:
             return result, True
         answers.append(result)
         if len(answers) == 2:
             a, b = answers
-            if (a[0].get("icao") == b[0].get("icao")
-                    and a[1].get("icao") == b[1].get("icao")):
-                return a, True
+            if (a["origin"].get("icao") == b["origin"].get("icao")
+                    and a["destination"].get("icao") == b["destination"].get("icao")):
+                # keep whichever answer carried a flight number
+                return (a if a.get("flight_no") else b), True
             _rlog(f"{cs}: providers disagree "
-                  f"({a[0].get('icao')}->{a[1].get('icao')} vs "
-                  f"{b[0].get('icao')}->{b[1].get('icao')}), suppressed")
+                  f"({a['origin'].get('icao')}->{a['destination'].get('icao')} vs "
+                  f"{b['origin'].get('icao')}->{b['destination'].get('icao')}), suppressed")
             return None, True
     if ROUTE_STRICT and len(answers) == 1:
         return answers[0], True           # only one DB knows it; can't cross-check
@@ -354,12 +373,17 @@ def resolve_route(cs, lat, lon):
 def lookup_routes(entries):
     """entries: [(callsign, lat, lon)] -> {callsign: route | None}.
     Only airline-style callsigns (AAA123) are looked up; registrations have
-    no filed route in these databases."""
-    new = 0
+    no filed route in these databases.
+
+    Unlike the FR24 path this is one request per callsign, so it is bounded
+    twice over: at most MAX_NEW_LOOKUPS new callsigns per refresh, and a wall
+    -clock budget, since a render must not stall behind a slow provider. What
+    doesn't resolve this cycle is picked up on the next one."""
+    new, deadline = 0, time.time() + ROUTE_BUDGET_S
     for c, la, lo in entries:
         if not c or c in ROUTE_CACHE or not AIRLINE_CS.match(c):
             continue
-        if new >= MAX_NEW_LOOKUPS:
+        if new >= MAX_NEW_LOOKUPS or time.time() > deadline:
             break
         new += 1
         result, definitive = resolve_route(c, la, lo)
@@ -410,25 +434,29 @@ def enu_km(lat, lon, home_lat, home_lon):
 
 # ---------------------------------------------------------------- upstream
 # Positions come from the free ADS-B feeds (accurate, unlimited, frequent) and
-# drive the map + prediction. FlightRadar24 (metered, first-party) is spent
-# ONLY to enrich the handful of flights actually on the board with accurate
-# route / airline / ETA: FR24 charges 8 credits per returned flight and the
-# Explorer tier is 30k credits/month, so scanning the whole sky through it
-# would drain the month in minutes. Route data is static per flight, so we
-# cache it hard by callsign and spend credits only on new flights, in-view
-# first, until a monthly safety cap — then we degrade gracefully to no route.
+# drive the map + prediction. Routes come from the free community databases
+# above — adsbdb carries the IATA flight number as well as the airports, which
+# together are everything the board displays.
+#
+# FlightRadar24 (metered, first-party) is now only a gap-filler for the
+# callsigns those databases don't know. It bills 8 credits per returned flight
+# against a 30k/month Explorer tier, so it is asked last, for the leftovers,
+# and only under a monthly safety cap — past that we degrade gracefully to no
+# route. Leaving F24_KEY unset runs the whole board for free.
 F24_KEY = os.environ.get("F24_KEY")
 FR24_BASE = "https://fr24api.flightradar24.com"
 FR24_MONTHLY_CAP = int(os.environ.get("FR24_MONTHLY_CREDITS", "29000"))
 FR24_ROUTE_TTL = float(os.environ.get("FR24_ROUTE_TTL", "3600"))
-FR24_ENRICH_MAX = int(os.environ.get("FR24_ENRICH_MAX", "14"))  # flights/render
+FR24_ENRICH_MAX = int(os.environ.get("FR24_ENRICH_MAX", "14"))  # legacy alias
+# Board flights enriched per render, whichever source answers.
+ENRICH_MAX = int(os.environ.get("ROUTE_ENRICH_MAX", str(FR24_ENRICH_MAX)))
 FR24_CREDIT_PER_FLIGHT = 8
 _fr24_routes = {}   # callsign -> (ts, route dict | None)
 
 # Live diagnostics surfaced on the board's debug panel.
 # credits_est = our local running tally since restart (always known);
 # credits_used = the real monthly figure from FR24 /api/usage (best-effort).
-DIAG = {"source": None, "n_scan": 0, "n_enriched": 0, "fetched_at": None,
+DIAG = {"source": None, "n_scan": 0, "n_enriched": 0, "n_fr24": 0, "fetched_at": None,
         "error": None, "credits_used": None, "credits_est": 0,
         "credits_cap": FR24_MONTHLY_CAP, "credits_at": None, "fr24": bool(F24_KEY)}
 
@@ -520,7 +548,7 @@ def fetch_aircraft(source, lat, lon, range_km):
         recs = [_norm_adsb(a) for a in ac
                 if a.get("lat") is not None and a.get("lon") is not None
                 and a.get("alt_geom", a.get("alt_baro")) != "ground"]
-        DIAG.update(source="ADSB+FR24" if F24_KEY else "ADSB",
+        DIAG.update(source="ADSB+DB+FR24" if F24_KEY else "ADSB+DB",
                     n_scan=len(recs), fetched_at=time.time(), error=None)
         return recs
     except Exception as e:
@@ -529,33 +557,60 @@ def fetch_aircraft(source, lat, lon, range_km):
 
 
 def enrich_routes(flights):
-    """Fill origin/destination/airline/eta on up to FR24_ENRICH_MAX board
-    flights (in-view first) via FR24. Routes are cached hard by callsign, so a
-    single batched call per render fetches only the callsigns not already
-    known, and only while under the monthly credit cap."""
-    now = time.time()
-    board = flights[:FR24_ENRICH_MAX]
-    need = [f["callsign"] for f in board if f.get("callsign")
-            and not (_fr24_routes.get(f["callsign"])
-                     and now - _fr24_routes[f["callsign"]][0] < FR24_ROUTE_TTL)]
-    if need and F24_KEY and _fr24_budget_ok():
-        fetched = fr24_fetch_routes(need)
-        for c in need:
-            _fr24_routes[c] = (now, fetched.get(c))   # cache misses too, to avoid re-query
-    DIAG["n_enriched"] = 0
+    """Fill origin/destination/flight number/airline on the board's flights.
+
+    The free community route databases are the primary source: no key, no
+    quota, and adsbdb carries the IATA flight number alongside the route.
+    FR24, when a key is configured, is spent only on the callsigns the free
+    chain could not resolve — it bills 8 credits per flight, so it earns its
+    place as a gap-filler rather than the default. Everything is cached hard
+    by callsign, so a given flight costs at most one lookup."""
+    board = flights[:ENRICH_MAX]
+    routes = lookup_routes([(f.get("callsign"), f.get("lat"), f.get("lon"))
+                            for f in board])
+
+    n_free, unresolved = 0, []
     for f in board:
-        hit = _fr24_routes.get(f.get("callsign"))
-        rt = hit[1] if hit else None
+        rt = routes.get(f.get("callsign"))
         if not rt:
+            if f.get("callsign"):
+                unresolved.append(f)
             continue
-        f["origin"] = airport_info(rt.get("orig_iata"), rt.get("orig_icao"))
-        f["destination"] = airport_info(rt.get("dest_iata"), rt.get("dest_icao"))
-        f["eta"] = rt.get("eta")
+        f["origin"] = rt["origin"]
+        f["destination"] = rt["destination"]
         if rt.get("flight_no"):
             f["flight_no"] = rt["flight_no"]
-        if rt.get("airline_code"):
-            f["airline"] = airline_for(f.get("callsign"), rt["airline_code"])
-        DIAG["n_enriched"] += 1
+        # keep the curated short name from AIRLINES when we already have one
+        if rt.get("airline") and not f.get("airline"):
+            f["airline"] = rt["airline"]
+        n_free += 1
+
+    n_fr24 = 0
+    if unresolved and F24_KEY and _fr24_budget_ok():
+        now = time.time()
+        need = [f["callsign"] for f in unresolved
+                if not (_fr24_routes.get(f["callsign"])
+                        and now - _fr24_routes[f["callsign"]][0] < FR24_ROUTE_TTL)]
+        if need:
+            fetched = fr24_fetch_routes(need)
+            for c in need:
+                _fr24_routes[c] = (now, fetched.get(c))  # cache misses too
+        for f in unresolved:
+            hit = _fr24_routes.get(f.get("callsign"))
+            rt = hit[1] if hit else None
+            if not rt:
+                continue
+            f["origin"] = airport_info(rt.get("orig_iata"), rt.get("orig_icao"))
+            f["destination"] = airport_info(rt.get("dest_iata"), rt.get("dest_icao"))
+            f["eta"] = rt.get("eta")
+            if rt.get("flight_no"):
+                f["flight_no"] = rt["flight_no"]
+            if rt.get("airline_code"):
+                f["airline"] = airline_for(f.get("callsign"), rt["airline_code"])
+            n_fr24 += 1
+
+    DIAG["n_enriched"] = n_free + n_fr24
+    DIAG["n_fr24"] = n_fr24
     return flights
 
 
@@ -870,6 +925,7 @@ def board_data(cfg):
                 "n_board": len(out),
                 "n_held": n_held,
                 "n_enriched": DIAG["n_enriched"],
+                "n_fr24": DIAG["n_fr24"],
                 "fetched_at": DIAG["fetched_at"],
                 "error": DIAG["error"],
                 "fr24": DIAG["fr24"],

@@ -20,8 +20,11 @@ services:
       # RANGE_KM: "5"
       # MIN_ELEV: "8"
       # SOURCE: "adsblol"      # adsblol | airplaneslive | adsbfi
-      # ROUTE_PROVIDERS: "adsbdb,hexdb"   # origin/destination lookup chain
+      # --- route lookup: free, no key, no quota (see .env.example) ---
+      # ROUTE_PROVIDERS: "adsbdb,hexdb"   # origin/destination + flight number
       # ROUTE_STRICT: "1"      # require both DBs to agree on a route, else blank
+      # ROUTE_MAX_NEW: "8"     # new callsigns looked up per render
+      # ROUTE_BUDGET_S: "8"    # wall-clock budget for those lookups
 
       # --- arrival prediction (see .env.example for the reasoning) ---
       # PREDICT_RANGE_KM: "30"     # scan radius for approaching traffic

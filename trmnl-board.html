@@ -280,7 +280,7 @@ const SAMPLE={
   config:{bearing:135.0, fov:145.0, range_km:5.0, predict_range_km:30.0,
     map_range_km:20.0, horizon_min:4.0,
     battery:{voltage:3.98, percent:77, rssi:-61},
-    debug:{source:"ADSB+FR24", n_scan:318, n_board:8, n_held:2, n_enriched:8,
+    debug:{source:"ADSB+DB+FR24", n_scan:318, n_board:8, n_held:2, n_enriched:8, n_fr24:1,
       fetched_at:Date.now()/1000-4, error:null, fr24:true,
       credits_used:120, credits_est:48, credits_cap:29000},
     geo:{
@@ -391,8 +391,10 @@ function renderDebug(cfg){
     const cap=d.credits_cap||0;
     const used=(d.credits_used!=null)?d.credits_used:d.credits_est;
     const pct=cap?used/cap:0;
-    fr24=`FR24 <b>${used}</b>/${cap} <span class="bar">${creditBar(pct,10)}</span> `+
-         `${(pct*100).toFixed(1)}%`;
+    // "+2" = how many of this render's flights needed FR24 because the free
+    // route databases had no answer for them
+    fr24=`FR24 <b>+${d.n_fr24||0}</b> ${used}/${cap} `+
+         `<span class="bar">${creditBar(pct,10)}</span> ${(pct*100).toFixed(1)}%`;
   }
   const age=(d.fetched_at!=null)?Math.max(0,Math.round(Date.now()/1000-d.fetched_at)):"?";
   const err=(d.error==null||d.error==="")?"—":esc(String(d.error));

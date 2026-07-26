@@ -49,12 +49,13 @@ def probe(callsigns):
                 ms = int((time.time() - t0) * 1000)
                 stats[name]["ms"].append(ms)
                 if result:
-                    o, d = result
+                    o, d = result["origin"], result["destination"]
                     stats[name]["ok"] += 1
+                    fno = result.get("flight_no") or "-"
                     print(f"  {name:<8} OK    {o.get('iata') or o.get('icao'):>4} "
                           f"({o.get('city') or o.get('name') or '?'}) -> "
                           f"{d.get('iata') or d.get('icao')} "
-                          f"[{o.get('country')}] {ms}ms")
+                          f"[{o.get('country')}] flight={fno} {ms}ms")
                 else:
                     stats[name]["miss"] += 1
                     print(f"  {name:<8} miss  (not in this database) {ms}ms")
