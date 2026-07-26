@@ -8,11 +8,11 @@
   map and board side by side beneath it, and a diagnostics line along the
   bottom.
 
-  · LEFT  (68%): a view-up radar-style vector map centred on home — view
+  · LEFT  (64%): a view-up radar-style vector map centred on home — view
     cone, range rings, Thames, landmarks, compass rose, home marker, and each
     aircraft plotted at its (bearing, distance) with a heading arrow and its
     flight number.
-  · RIGHT (32%): one split-flap list — FLIGHT · FROM · TO · ETA, with the
+  · RIGHT (36%): one split-flap list — FLIGHT · FROM · TO · ETA, with the
     airline and origin as a text line above each row's tiles.
 
   · Resolution-independent: the layout fills the viewport, so the same file
@@ -59,7 +59,7 @@
 
   /* ---- LEFT: the map panel, now the dominant half of the screen ---- */
   .left{
-    width:68%;height:100%;
+    width:64%;height:100%;
     padding:var(--pad-y) calc(var(--pad-x)*.6) var(--pad-y) var(--pad-x);
     display:flex;flex-direction:column;
   }
@@ -89,7 +89,7 @@
 
   /* ---- RIGHT: the split-flap panel ---- */
   .right{
-    width:32%;height:100%;
+    width:36%;height:100%;
     padding:var(--pad-y) var(--pad-x) var(--pad-y) calc(var(--pad-x)*.7);
     display:flex;flex-direction:column;
     border-left:calc(var(--seam-h)*2) solid var(--l);
@@ -120,7 +120,7 @@
   /* ---- the board ---- */
   #board{flex:1;display:flex;flex-direction:column;justify-content:space-between}
   /* Each row stacks: airline + origin on a text line, split-flap tiles below.
-     The airline is no longer a column of its own — at 32% width the tiles
+     The airline is no longer a column of its own — at 36% width the tiles
      need the full row. */
   .row{display:flex;flex-direction:column;gap:calc(var(--tile-h)*.10)}
   .flaps{display:flex;gap:var(--col-gap)}
@@ -233,7 +233,7 @@ let ROWS=5;   /* recomputed from the viewport by layout() */
 function layout(){
   const set=document.documentElement.style;
   const W=window.innerWidth, H=window.innerHeight;
-  const rightW = W*0.32;                                 // right panel width
+  const rightW = W*0.36;                                 // right panel width
   const nCols   = COLS.reduce((a,c)=>a+c[1],0);          // tiles across
   const nGroups = COLS.length;                            // column groups
   const nTileGap= COLS.reduce((a,c)=>a+c[1]-1,0);        // gaps within groups
