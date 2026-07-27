@@ -297,7 +297,7 @@ const SAMPLE={
   config:{bearing:135.0, fov:145.0, range_km:5.0, predict_range_km:30.0,
     map_range_km:20.0, horizon_min:4.0,
     battery:{voltage:3.98, percent:77, rssi:-61},
-    debug:{source:"ADSB+DB+FR24", n_scan:318, n_board:8, n_held:2, n_enriched:8, n_fr24:1, n_turn:3,
+    debug:{source:"ADSB+DB+FR24", n_scan:318, n_board:8, n_held:2, n_enriched:8, n_fr24:1, n_turn:3, turn:true,
       fetched_at:Date.now()/1000-4, error:null, fr24:true,
       credits_used:120, credits_est:48, credits_cap:29000},
     geo:{
@@ -403,7 +403,9 @@ function renderDebug(cfg){
               `BOARD <b>${d.n_board}</b>`,
               `HELD <b>${d.n_held||0}</b>`,
               `ENR <b>${d.n_enriched}</b>`,
-              `TURN <b>${d.n_turn==null?"?":d.n_turn}</b>`];
+              // "off" vs "0" matters: one means the feature is disabled, the other
+              // means the feed carries no bank angle or rate of turn
+              `TURN <b>${d.turn===false?"off":(d.n_turn==null?"?":d.n_turn)}</b>`];
   let fr24;
   if(d.fr24===false){
     fr24=`FR24 <b>off</b>`;

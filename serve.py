@@ -74,6 +74,15 @@ if DEFAULTS["lat"] is None or DEFAULTS["lon"] is None:
 if os.environ.get("SOURCE"):
     DEFAULTS["source"] = os.environ["SOURCE"]
 
+# Turning traffic (arc projection, approach badge, the arc drawn on the map)
+# is one feature behind one switch. TURN_ENABLED=0 makes turn_rate_dps always
+# answer "unknown" — the same state as a feed reporting neither bank angle nor
+# rate of turn — so every consumer falls back to the straight-line behaviour
+# that predates it. Gated at the source so nothing downstream can fire by
+# accident; the machinery itself is further down, by the prediction code.
+TURN_ENABLED = os.environ.get("TURN_ENABLED", "1").strip().lower() \
+    not in ("0", "false", "no", "off", "")
+
 UPSTREAMS = {
     "adsblol":       "https://api.adsb.lol/v2/point/{lat}/{lon}/{nm}",
     "airplaneslive": "https://api.airplanes.live/v2/point/{lat}/{lon}/{nm}",
@@ -457,6 +466,7 @@ _fr24_routes = {}   # callsign -> (ts, route dict | None)
 # credits_est = our local running tally since restart (always known);
 # credits_used = the real monthly figure from FR24 /api/usage (best-effort).
 DIAG = {"source": None, "n_scan": 0, "n_enriched": 0, "n_fr24": 0, "n_turn": 0,
+        "turn": TURN_ENABLED,
         "fetched_at": None,
         "error": None, "credits_used": None, "credits_est": 0,
         "credits_cap": FR24_MONTHLY_CAP, "credits_at": None, "fr24": bool(F24_KEY)}
@@ -736,11 +746,14 @@ TURN_MIN_DPS = float(os.environ.get("TURN_MIN_DPS", "0.4"))   # below this = str
 G_MS2 = 9.80665
 
 
+
 def turn_rate_dps(roll_deg, gs_kt, track_rate):
     """Rate of turn in deg/s, positive = to the right, or None if unknown.
 
     Prefers the feed's own track_rate; otherwise derives it from bank angle
     and ground speed via the coordinated-turn relation w = g*tan(bank)/V."""
+    if not TURN_ENABLED:
+        return None
     if track_rate is not None:
         try:
             return float(track_rate)
@@ -1093,6 +1106,7 @@ def board_data(cfg):
                 "n_enriched": DIAG["n_enriched"],
                 "n_fr24": DIAG["n_fr24"],
                 "n_turn": DIAG["n_turn"],
+                "turn": DIAG["turn"],
                 "fetched_at": DIAG["fetched_at"],
                 "error": DIAG["error"],
                 "fr24": DIAG["fr24"],

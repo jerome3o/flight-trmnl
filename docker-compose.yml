@@ -34,6 +34,7 @@ services:
       # PREDICT_CONFIRM: "3"       # renders a prediction must survive (1 = off)
       # PREDICT_MISS_MAX_KM: "0"   # 0 = off; drop predictions missing by more
       # MAX_BOARD_FLIGHTS: "14"    # rows on the board
+      # TURN_ENABLED: "0"          # one switch to disable turn/arc entirely
       # TURN_MIN_DPS: "0.4"        # deg/s below which an aircraft is level
       # APPROACH_MAX_KM: "45"      # range within which to claim an approach
       # APPROACH_MAX_FT: "12000"   # ...and the altitude ceiling for it
