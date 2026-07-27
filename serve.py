@@ -75,13 +75,16 @@ if os.environ.get("SOURCE"):
     DEFAULTS["source"] = os.environ["SOURCE"]
 
 # Turning traffic (arc projection, approach badge, the arc drawn on the map)
-# is one feature behind one switch. TURN_ENABLED=0 makes turn_rate_dps always
-# answer "unknown" — the same state as a feed reporting neither bank angle nor
-# rate of turn — so every consumer falls back to the straight-line behaviour
-# that predates it. Gated at the source so nothing downstream can fire by
-# accident; the machinery itself is further down, by the prediction code.
-TURN_ENABLED = os.environ.get("TURN_ENABLED", "1").strip().lower() \
-    not in ("0", "false", "no", "off", "")
+# is one feature behind one switch, and it is OFF by default until it has been
+# watched against real traffic. TURN_ENABLED=1 turns it on.
+#
+# Disabled, turn_rate_dps always answers "unknown" — the same state as a feed
+# reporting neither bank angle nor rate of turn — so every consumer falls back
+# to the straight-line behaviour that predates it. Gated at the source so
+# nothing downstream can fire by accident; the machinery itself is further
+# down, by the prediction code.
+TURN_ENABLED = os.environ.get("TURN_ENABLED", "0").strip().lower() \
+    in ("1", "true", "yes", "on")
 
 UPSTREAMS = {
     "adsblol":       "https://api.adsb.lol/v2/point/{lat}/{lon}/{nm}",
