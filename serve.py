@@ -710,7 +710,7 @@ PREDICT_MISS_MAX_KM = float(os.environ.get("PREDICT_MISS_MAX_KM", "0") or 0) or 
 # could flash a flight onto the board and drop it again. Require this many
 # consecutive renders predicting the same aircraft before it earns a row. Set
 # to 1 to disable. Aircraft actually in view are never held back.
-PREDICT_CONFIRM = max(1, int(os.environ.get("PREDICT_CONFIRM", "2")))
+PREDICT_CONFIRM = max(1, int(os.environ.get("PREDICT_CONFIRM", "3")))
 _predict_streak = {}   # hex -> consecutive renders this aircraft was predicted
 
 
@@ -953,7 +953,7 @@ def board_data(cfg):
 # an unguessable path derived from DEVICE_SALT — so the URL alone does not
 # expose your board.
 IMAGE_PATH = os.environ.get("RENDER_OUT", "latest.png")
-REFRESH_RATE = int(os.environ.get("REFRESH_RATE", "60"))
+REFRESH_RATE = int(os.environ.get("REFRESH_RATE", "30"))
 DEVICE_SALT = os.environ.get("DEVICE_SALT", "window-flights")
 
 if DEVICE_SALT == "window-flights":
