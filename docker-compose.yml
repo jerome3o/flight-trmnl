@@ -9,8 +9,10 @@ services:
         required: false
     environment:
       # active defaults (safe to leave as-is; everything below is optional)
-      REFRESH_RATE: "60"     # seconds the device sleeps between polls
-      RENDER_INTERVAL: "55"  # seconds between board renders
+      REFRESH_RATE: "30"     # seconds the device sleeps between polls
+      RENDER_INTERVAL: "30"  # seconds between board renders (keep the two
+                             # matched: polling faster than you render just
+                             # wakes the radio for an unchanged image)
 
       # --- the view cone (set your own location; see .env.example) ---
       # LAT: "51.5074"
@@ -29,9 +31,13 @@ services:
       # --- arrival prediction (see .env.example for the reasoning) ---
       # PREDICT_RANGE_KM: "30"     # scan radius for approaching traffic
       # PREDICT_HORIZON_MIN: "4"   # how far ahead to project
-      # PREDICT_CONFIRM: "2"       # renders a prediction must survive (1 = off)
+      # PREDICT_CONFIRM: "3"       # renders a prediction must survive (1 = off)
       # PREDICT_MISS_MAX_KM: "0"   # 0 = off; drop predictions missing by more
       # MAX_BOARD_FLIGHTS: "14"    # rows on the board
+      # TURN_ENABLED: "0"          # one switch to disable turn/arc entirely
+      # TURN_MIN_DPS: "0.4"        # deg/s below which an aircraft is level
+      # APPROACH_MAX_KM: "45"      # range within which to claim an approach
+      # APPROACH_MAX_FT: "12000"   # ...and the altitude ceiling for it
 
       # --- BYOS display (point the TRMNL at http://<host-ip>:8000) ---
       # Match your panel; firmware rejects a wrong-sized image (see .env.example)

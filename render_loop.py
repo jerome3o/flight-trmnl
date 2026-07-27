@@ -23,7 +23,7 @@ image that isn't the panel's exact size and does not scale:
 Environment:
   BOARD_URL        default http://127.0.0.1:8000/trmnl-board.html
   RENDER_OUT       default latest.png (must match serve.py's RENDER_OUT)
-  RENDER_INTERVAL  seconds between renders, default 55
+  RENDER_INTERVAL  seconds between renders, default 30
   RENDER_WIDTH     panel width in px, default 1872
   RENDER_HEIGHT    panel height in px, default 1404
   RENDER_DEPTH     "4bit" (default, TRMNL X) | "2bit" | "1bit" (legacy)
@@ -40,7 +40,7 @@ import urllib.request
 
 BOARD_URL = os.environ.get("BOARD_URL", "http://127.0.0.1:8000/trmnl-board.html")
 OUT = os.environ.get("RENDER_OUT", "latest.png")
-INTERVAL = int(os.environ.get("RENDER_INTERVAL", "55"))
+INTERVAL = int(os.environ.get("RENDER_INTERVAL", "30"))
 WIDTH = int(os.environ.get("RENDER_WIDTH", "1872"))
 HEIGHT = int(os.environ.get("RENDER_HEIGHT", "1404"))
 DEPTH = os.environ.get("RENDER_DEPTH", "4bit")

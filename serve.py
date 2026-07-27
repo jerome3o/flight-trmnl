@@ -74,6 +74,15 @@ if DEFAULTS["lat"] is None or DEFAULTS["lon"] is None:
 if os.environ.get("SOURCE"):
     DEFAULTS["source"] = os.environ["SOURCE"]
 
+# Turning traffic (arc projection, approach badge, the arc drawn on the map)
+# is one feature behind one switch. TURN_ENABLED=0 makes turn_rate_dps always
+# answer "unknown" — the same state as a feed reporting neither bank angle nor
+# rate of turn — so every consumer falls back to the straight-line behaviour
+# that predates it. Gated at the source so nothing downstream can fire by
+# accident; the machinery itself is further down, by the prediction code.
+TURN_ENABLED = os.environ.get("TURN_ENABLED", "1").strip().lower() \
+    not in ("0", "false", "no", "off", "")
+
 UPSTREAMS = {
     "adsblol":       "https://api.adsb.lol/v2/point/{lat}/{lon}/{nm}",
     "airplaneslive": "https://api.airplanes.live/v2/point/{lat}/{lon}/{nm}",
@@ -456,7 +465,9 @@ _fr24_routes = {}   # callsign -> (ts, route dict | None)
 # Live diagnostics surfaced on the board's debug panel.
 # credits_est = our local running tally since restart (always known);
 # credits_used = the real monthly figure from FR24 /api/usage (best-effort).
-DIAG = {"source": None, "n_scan": 0, "n_enriched": 0, "n_fr24": 0, "fetched_at": None,
+DIAG = {"source": None, "n_scan": 0, "n_enriched": 0, "n_fr24": 0, "n_turn": 0,
+        "turn": TURN_ENABLED,
+        "fetched_at": None,
         "error": None, "credits_used": None, "credits_est": 0,
         "credits_cap": FR24_MONTHLY_CAP, "credits_at": None, "fr24": bool(F24_KEY)}
 
@@ -530,6 +541,9 @@ def _norm_adsb(r):
         "alt_ft": float(alt) if isinstance(alt, (int, float)) else None,
         "gs_kt": r.get("gs"), "track_deg": r.get("track"),
         "vs_fpm": r.get("geom_rate", r.get("baro_rate")),
+        # bank angle and rate of turn, when the feed carries them — these turn
+        # a straight-line guess into an arc for manoeuvring traffic
+        "roll": r.get("roll"), "track_rate": r.get("track_rate"),
         "type": r.get("t"), "callsign": (r.get("flight") or "").strip(),
         "flight_no": None, "reg": r.get("r"), "hex": r.get("hex"),
         "airline_code": r.get("ownOp"), "squawk": r.get("squawk"),
@@ -654,6 +668,8 @@ def _flight_record(ac, cfg, dist, brg, elev, in_view):
         "squawk": ac.get("squawk"),
         "eta": None,
         "miss_km": None,      # set by board_data for predicted arrivals
+        "turn_dps": None,     # rate of turn, deg/s, + = right
+        "turning_for": None,  # IATA of the field it is banking towards
         "origin": None,
         "destination": None,
     }
@@ -710,8 +726,111 @@ PREDICT_MISS_MAX_KM = float(os.environ.get("PREDICT_MISS_MAX_KM", "0") or 0) or 
 # could flash a flight onto the board and drop it again. Require this many
 # consecutive renders predicting the same aircraft before it earns a row. Set
 # to 1 to disable. Aircraft actually in view are never held back.
-PREDICT_CONFIRM = max(1, int(os.environ.get("PREDICT_CONFIRM", "2")))
+PREDICT_CONFIRM = max(1, int(os.environ.get("PREDICT_CONFIRM", "3")))
+# How far apart renders are, so the gate can reason in wall-clock rather
+# than in renders. Mirrors render_loop.py's RENDER_INTERVAL.
+RENDER_INTERVAL_HINT = float(os.environ.get("RENDER_INTERVAL", "30"))
 _predict_streak = {}   # hex -> consecutive renders this aircraft was predicted
+
+
+# ---- turning traffic -------------------------------------------------------
+# A straight-line projection is what makes distant predictions unreliable, and
+# terminal traffic turns constantly. When the feed reports bank angle or rate
+# of turn we can do better: fly the aircraft round its actual arc instead.
+#
+# Neither field is guaranteed — plenty of aircraft report neither — so every
+# consumer below degrades to the straight-line path when turn data is absent.
+# DIAG["n_turn"] counts how many of the scanned aircraft carried it, so the
+# board itself answers whether your feed supplies it.
+TURN_MIN_DPS = float(os.environ.get("TURN_MIN_DPS", "0.4"))   # below this = straight
+G_MS2 = 9.80665
+
+
+
+def turn_rate_dps(roll_deg, gs_kt, track_rate):
+    """Rate of turn in deg/s, positive = to the right, or None if unknown.
+
+    Prefers the feed's own track_rate; otherwise derives it from bank angle
+    and ground speed via the coordinated-turn relation w = g*tan(bank)/V."""
+    if not TURN_ENABLED:
+        return None
+    if track_rate is not None:
+        try:
+            return float(track_rate)
+        except (TypeError, ValueError):
+            pass
+    if roll_deg is None or not gs_kt:
+        return None
+    try:
+        phi, v = math.radians(float(roll_deg)), float(gs_kt) * 0.514444  # kt->m/s
+    except (TypeError, ValueError):
+        return None
+    if v < 20 or abs(phi) > math.radians(60):     # implausible bank: ignore
+        return None
+    return math.degrees(G_MS2 * math.tan(phi) / v)
+
+
+def _arc_xy(e0, n0, speed_kms, track_deg, omega_dps, t):
+    """Position t seconds along a constant-rate turn, in the flat frame.
+    Integrating a heading that rotates at a constant rate gives a circle of
+    radius V/w; omega_dps == 0 degenerates to the straight-line case."""
+    th0 = math.radians(track_deg)
+    if abs(omega_dps) < 1e-6:
+        return e0 + speed_kms * math.sin(th0) * t, n0 + speed_kms * math.cos(th0) * t
+    w = math.radians(omega_dps)
+    r = speed_kms / w
+    th = th0 + w * t
+    return (e0 + r * (math.cos(th0) - math.cos(th)),
+            n0 + r * (math.sin(th) - math.sin(th0)))
+
+
+# Airports close enough that traffic turning onto their approach passes the
+# window. Used only to name what an aircraft is turning towards.
+LOCAL_AIRPORTS = {
+    "LHR": (51.4700, -0.4543), "LCY": (51.5053, 0.0553),
+    "LGW": (51.1481, -0.1903), "STN": (51.8850, 0.2350),
+    "LTN": (51.8747, -0.3683),
+}
+
+
+# An aircraft manoeuvring anywhere near London is turning "towards" one of
+# these fields most of the time, so the claim only means something if it is
+# close enough and low enough to actually be joining the approach.
+APPROACH_MAX_KM = float(os.environ.get("APPROACH_MAX_KM", "45"))
+APPROACH_MAX_FT = float(os.environ.get("APPROACH_MAX_FT", "12000"))
+
+
+def approach_turn(lat, lon, alt_ft, track_deg, omega_dps, vs_fpm):
+    """Which local airport, if any, this aircraft is banking onto.
+
+    Requires a descending turn, below approach altitude, within range of the
+    field, actively closing the angle between its track and the bearing to
+    that field, and rolling out pointing at it inside a couple of minutes.
+    Where several qualify the nearest wins — a jet 6 km off London City is a
+    far better bet than one 40 km from Luton on a similar heading."""
+    if omega_dps is None or abs(omega_dps) < TURN_MIN_DPS or track_deg is None:
+        return None
+    if vs_fpm is None or vs_fpm > -200:      # arrivals descend; ignore climbs
+        return None
+    if alt_ft is None or alt_ft > APPROACH_MAX_FT:
+        return None
+    best, best_dist = None, None
+    for code, (alat, alon) in LOCAL_AIRPORTS.items():
+        dist = haversine_km(lat, lon, alat, alon)
+        if dist > APPROACH_MAX_KM:
+            continue
+        brg = bearing_deg(lat, lon, alat, alon)
+        # signed track error, positive when the field lies to the right
+        d = ((brg - track_deg + 180) % 360) - 180
+        if abs(d) < 5 or abs(d) > 150:       # already aligned, or facing away
+            continue
+        if (d > 0) != (omega_dps > 0):       # turning the other way
+            continue
+        if abs(d) / abs(omega_dps) > 150:    # would not roll out for minutes
+            continue
+        if best_dist is None or dist < best_dist:
+            best, best_dist = code, dist
+    return best
 
 
 def _cpa(e0, n0, ve, vn, radius_km):
@@ -734,47 +853,97 @@ def _cpa(e0, n0, ve, vn, radius_km):
     return t_cpa - half_chord, t_cpa + half_chord, miss
 
 
-def _entry_prediction(cfg, lat, lon, alt_ft, gs_kt, track_deg, vs_fpm, half):
+def _entry_prediction(cfg, lat, lon, alt_ft, gs_kt, track_deg, vs_fpm, half,
+                      omega_dps=None):
     """(seconds until the aircraft enters the view cone, predicted miss
-    distance in km). eta is None when it never enters within the horizon.
+    distance in km, seconds it then spends inside). eta is None when it never
+    enters within the horizon.
 
-    Reaching the range circle is the binding constraint — with a wide FOV
-    almost anything that gets within range is inside the bearing wedge too — so
-    that crossing is solved in closed form rather than sampled, and the angular
-    checks then run only across the interval already known to be in range. The
-    old fixed 20 s stepping could straddle the whole cone between samples (a
-    450 kt jet crosses 5 km in 22 s) while letting a single grazing sample earn
-    a board row; neither is possible now.
+    Wings level, reaching the range circle is the binding constraint — with a
+    wide FOV almost anything that gets within range is inside the bearing wedge
+    too — so that crossing is solved in closed form, and the angular checks run
+    only across the interval already known to be in range.
+
+    In a turn there is no such closed form, so the arc is walked instead. That
+    is the point: rather than projecting a straight line the aircraft is not
+    flying and being wrong, fly it round the circle its bank angle implies.
 
     miss_km doubles as a confidence signal: a track predicted to pass 0.5 km
     away is near-certain, one grazing the edge of the circle is a coin flip.
-
-    Still a straight-line projection, so it degrades on turning traffic — that
-    is what PREDICT_RANGE_KM's tolerance budget is there to bound."""
+    The dwell is what makes a brief pass distinguishable from a long one — a
+    crossing shorter than the confirmation window can never be confirmed
+    before it is over."""
     if not gs_kt or gs_kt < 30 or track_deg is None:
-        return None, None
+        return None, None, None
     e0, n0 = enu_km(lat, lon, cfg["lat"], cfg["lon"])
     speed = gs_kt * 1.852 / 3600.0          # kt -> km/s
+    turning = omega_dps is not None and abs(omega_dps) >= TURN_MIN_DPS
+
+    def visible_at(t):
+        """(in the cone?, distance km) at t seconds along the projected path."""
+        e, n = _arc_xy(e0, n0, speed, track_deg, omega_dps or 0.0, t)
+        d = math.hypot(e, n)
+        if d > cfg["range_km"]:
+            return False, d
+        brg = (math.degrees(math.atan2(e, n)) + 360.0) % 360.0
+        if angle_diff(brg, cfg["bearing"]) > half:
+            return False, d
+        a = (alt_ft + (vs_fpm or 0) * (t / 60.0)) if alt_ft is not None else None
+        elev = elevation_deg(d, a) if a is not None else None
+        return (elev is None or elev >= cfg["min_elev"]), d
+
+    if turning:
+        # Constant-rate arc: no closed form, so sample it finely. Only turning
+        # traffic pays this cost, and it is a handful of aircraft per render.
+        step, enter, leave, miss = 5.0, None, None, None
+        t = 0.0
+        while t <= PREDICT_HORIZON_S:
+            ok, d = visible_at(t)
+            miss = d if miss is None else min(miss, d)
+            if ok:
+                if enter is None:
+                    enter = t
+                leave = t
+            t += step
+        if enter is None:
+            return None, miss, None
+        return enter, miss, (leave - enter) + step
+
     ve = speed * math.sin(math.radians(track_deg))
     vn = speed * math.cos(math.radians(track_deg))
     t_enter, t_exit, miss = _cpa(e0, n0, ve, vn, cfg["range_km"])
     if t_enter is None or t_exit <= 0 or t_enter > PREDICT_HORIZON_S:
-        return None, miss
+        return None, miss, None
     # Walk the in-range interval for the first moment it is also inside the
     # wedge and high enough to clear the skyline.
     t0, t1 = max(t_enter, 0.0), min(t_exit, float(PREDICT_HORIZON_S))
     steps = max(1, min(12, int((t1 - t0) / PREDICT_STEP_S) + 1))
     for i in range(steps + 1):
         t = t0 + (t1 - t0) * i / steps
-        e, n = e0 + ve * t, n0 + vn * t
-        if angle_diff((math.degrees(math.atan2(e, n)) + 360.0) % 360.0,
-                      cfg["bearing"]) > half:
-            continue
-        a = (alt_ft + (vs_fpm or 0) * (t / 60.0)) if alt_ft is not None else None
-        elev = elevation_deg(math.hypot(e, n), a) if a is not None else None
-        if elev is None or elev >= cfg["min_elev"]:
-            return t, miss
-    return None, miss
+        ok, _ = visible_at(t)
+        if ok:
+            return t, miss, max(0.0, t1 - t)
+    return None, miss, None
+
+
+def _confirmations_for(f):
+    """How many consecutive renders this prediction must survive.
+
+    The full count is right for a flight predicted minutes out — that is where
+    a straight-line projection is least trustworthy and most worth filtering.
+    It is arithmetically impossible for a brief pass: a crossing that starts in
+    40 s and lasts 18 s is over long before three renders 30 s apart can agree
+    on it. So when the whole event fits inside the confirmation window, ask for
+    one sighting instead and let it through."""
+    if PREDICT_CONFIRM <= 1:
+        return 1
+    eta, dwell = f.get("_eta_s"), f.get("_dwell_s")
+    if eta is None:
+        return PREDICT_CONFIRM
+    window = PREDICT_CONFIRM * RENDER_INTERVAL_HINT
+    if eta + (dwell or 0.0) <= window:
+        return 1
+    return PREDICT_CONFIRM
 
 
 def _apply_confirmation(candidates):
@@ -792,7 +961,7 @@ def _apply_confirmation(candidates):
             continue
         streak = _predict_streak.get(key, 0) + 1
         _predict_streak[key] = streak
-        if streak >= PREDICT_CONFIRM:
+        if streak >= _confirmations_for(f):
             kept.append(f)
     for key in list(_predict_streak):     # any gap in the scan breaks the streak
         if key not in seen:
@@ -879,7 +1048,7 @@ def board_data(cfg):
     board can draw the map."""
     ac_list = fetch_aircraft(cfg["source"], cfg["lat"], cfg["lon"], PREDICT_RANGE_KM)
     half = cfg["fov"] / 2.0
-    out = []
+    out, n_turn = [], 0
     for ac in ac_list:
         lat, lon = ac["lat"], ac["lon"]
         alt_ft = ac.get("alt_ft")
@@ -890,10 +1059,14 @@ def board_data(cfg):
         in_view = (dist <= cfg["range_km"]
                    and angle_diff(brg, cfg["bearing"]) <= half
                    and (elev is None or elev >= cfg["min_elev"]))
+        omega = turn_rate_dps(ac.get("roll"), gs, ac.get("track_rate"))
+        if omega is not None:
+            n_turn += 1
         if in_view:
-            eta_s, miss = 0.0, 0.0
+            eta_s, miss, dwell = 0.0, 0.0, None
         else:
-            eta_s, miss = _entry_prediction(cfg, lat, lon, alt_ft, gs, track, vs, half)
+            eta_s, miss, dwell = _entry_prediction(
+                cfg, lat, lon, alt_ft, gs, track, vs, half, omega)
             if eta_s is not None and PREDICT_MISS_MAX_KM is not None \
                     and miss is not None and miss > PREDICT_MISS_MAX_KM:
                 continue
@@ -902,8 +1075,14 @@ def board_data(cfg):
         rec = _flight_record(ac, cfg, dist, brg, elev, in_view)
         rec["eta_min"] = round(eta_s / 60.0, 1)
         rec["miss_km"] = round(miss, 2) if miss is not None else None
+        rec["turn_dps"] = round(omega, 2) if omega is not None else None
+        rec["turning_for"] = approach_turn(lat, lon, alt_ft, track, omega, vs)
+        rec["_eta_s"], rec["_dwell_s"] = eta_s, dwell   # for the confirm gate
         out.append(rec)
     out, n_held = _apply_confirmation(out)
+    for f in out:
+        f.pop("_eta_s", None); f.pop("_dwell_s", None)
+    DIAG["n_turn"] = n_turn
     # in-view first, then soonest arrivals; keep the board readable
     out.sort(key=lambda f: (not f["in_view"], f["eta_min"], f["dist_km"]))
     out = out[:MAX_BOARD_FLIGHTS]
@@ -926,6 +1105,8 @@ def board_data(cfg):
                 "n_held": n_held,
                 "n_enriched": DIAG["n_enriched"],
                 "n_fr24": DIAG["n_fr24"],
+                "n_turn": DIAG["n_turn"],
+                "turn": DIAG["turn"],
                 "fetched_at": DIAG["fetched_at"],
                 "error": DIAG["error"],
                 "fr24": DIAG["fr24"],
@@ -953,7 +1134,7 @@ def board_data(cfg):
 # an unguessable path derived from DEVICE_SALT — so the URL alone does not
 # expose your board.
 IMAGE_PATH = os.environ.get("RENDER_OUT", "latest.png")
-REFRESH_RATE = int(os.environ.get("REFRESH_RATE", "60"))
+REFRESH_RATE = int(os.environ.get("REFRESH_RATE", "30"))
 DEVICE_SALT = os.environ.get("DEVICE_SALT", "window-flights")
 
 if DEVICE_SALT == "window-flights":
