@@ -75,13 +75,16 @@ if os.environ.get("SOURCE"):
     DEFAULTS["source"] = os.environ["SOURCE"]
 
 # Turning traffic (arc projection, approach badge, the arc drawn on the map)
-# is one feature behind one switch. TURN_ENABLED=0 makes turn_rate_dps always
-# answer "unknown" — the same state as a feed reporting neither bank angle nor
-# rate of turn — so every consumer falls back to the straight-line behaviour
-# that predates it. Gated at the source so nothing downstream can fire by
-# accident; the machinery itself is further down, by the prediction code.
-TURN_ENABLED = os.environ.get("TURN_ENABLED", "1").strip().lower() \
-    not in ("0", "false", "no", "off", "")
+# is one feature behind one switch, and it is OFF by default until it has been
+# watched against real traffic. TURN_ENABLED=1 turns it on.
+#
+# Disabled, turn_rate_dps always answers "unknown" — the same state as a feed
+# reporting neither bank angle nor rate of turn — so every consumer falls back
+# to the straight-line behaviour that predates it. Gated at the source so
+# nothing downstream can fire by accident; the machinery itself is further
+# down, by the prediction code.
+TURN_ENABLED = os.environ.get("TURN_ENABLED", "0").strip().lower() \
+    in ("1", "true", "yes", "on")
 
 UPSTREAMS = {
     "adsblol":       "https://api.adsb.lol/v2/point/{lat}/{lon}/{nm}",
@@ -787,9 +790,9 @@ def _arc_xy(e0, n0, speed_kms, track_deg, omega_dps, t):
 # Airports close enough that traffic turning onto their approach passes the
 # window. Used only to name what an aircraft is turning towards.
 LOCAL_AIRPORTS = {
-    "LHR": (51.4700, -0.4543), "LCY": (51.5053, 0.0553),
-    "LGW": (51.1481, -0.1903), "STN": (51.8850, 0.2350),
-    "LTN": (51.8747, -0.3683),
+    "LHR": (51.4700, -0.4543, "EGLL"), "LCY": (51.5053, 0.0553, "EGLC"),
+    "LGW": (51.1481, -0.1903, "EGKK"), "STN": (51.8850, 0.2350, "EGSS"),
+    "LTN": (51.8747, -0.3683, "EGGW"),
 }
 
 
@@ -815,7 +818,7 @@ def approach_turn(lat, lon, alt_ft, track_deg, omega_dps, vs_fpm):
     if alt_ft is None or alt_ft > APPROACH_MAX_FT:
         return None
     best, best_dist = None, None
-    for code, (alat, alon) in LOCAL_AIRPORTS.items():
+    for code, (alat, alon, _icao) in LOCAL_AIRPORTS.items():
         dist = haversine_km(lat, lon, alat, alon)
         if dist > APPROACH_MAX_KM:
             continue
@@ -831,6 +834,37 @@ def approach_turn(lat, lon, alt_ft, track_deg, omega_dps, vs_fpm):
         if best_dist is None or dist < best_dist:
             best, best_dist = code, dist
     return best
+
+
+def validate_approach_turns(flights):
+    """Withdraw a "turning for X" claim when the flight is filed somewhere else.
+
+    Geometry alone is weak evidence: an aircraft descending through the London
+    TMA is banking towards *something* most of the time, and a jet turning
+    across Heathrow's extended centreline on its way to Gatwick is not turning
+    for Heathrow. The route says where it is actually going, so it gets the
+    final word.
+
+    Routes are resolved after the prediction runs, so the claim is made on
+    geometry in board_data and withdrawn here once the destination is known.
+    An unknown destination leaves the geometric claim standing — plenty of
+    flights never resolve, and descending + low + close + turning towards is
+    still the best evidence available for those."""
+    for f in flights:
+        code = f.get("turning_for")
+        if not code:
+            continue
+        dest = f.get("destination") or {}
+        iata = (dest.get("iata") or "").strip().upper()
+        icao = (dest.get("icao") or "").strip().upper()
+        if not iata and not icao:
+            continue                                  # unknown: geometry stands
+        want_icao = LOCAL_AIRPORTS.get(code, (None, None, None))[2]
+        if iata == code or (icao and icao == want_icao):
+            continue                                  # corroborated
+        _rlog(f"{f.get('callsign')}: banking towards {code} but filed for "
+              f"{iata or icao} — claim withdrawn")
+        f["turning_for"] = None
 
 
 def _cpa(e0, n0, ve, vn, radius_km):
@@ -1086,7 +1120,8 @@ def board_data(cfg):
     # in-view first, then soonest arrivals; keep the board readable
     out.sort(key=lambda f: (not f["in_view"], f["eta_min"], f["dist_km"]))
     out = out[:MAX_BOARD_FLIGHTS]
-    enrich_routes(out)          # FR24 routes for just these (in-view first)
+    enrich_routes(out)          # routes for just these (in-view first)
+    validate_approach_turns(out)   # the filed destination vetoes the geometry
     fr24_usage()                # refresh credit counter for the debug panel
     return {
         "config": {
