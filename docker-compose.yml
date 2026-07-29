@@ -22,6 +22,10 @@ services:
       # RANGE_KM: "5"
       # MIN_ELEV: "8"
       # SOURCE: "adsblol"      # adsblol | airplaneslive | adsbfi
+      # BOARD_REFRESH_S: "10"  # background rescan cadence (see .env.example)
+      # ADSB_TIMEOUT_S: "10"
+      # ROUTE_TIMEOUT_S: "4"
+      # FR24_ENABLED: "1"      # off by default; needed as well as F24_KEY
       # --- route lookup: free, no key, no quota (see .env.example) ---
       # ROUTE_PROVIDERS: "adsbdb,hexdb"   # origin/destination + flight number
       # ROUTE_STRICT: "1"      # require both DBs to agree on a route, else blank
@@ -31,7 +35,7 @@ services:
       # --- arrival prediction (see .env.example for the reasoning) ---
       # PREDICT_RANGE_KM: "30"     # scan radius for approaching traffic
       # PREDICT_HORIZON_MIN: "4"   # how far ahead to project
-      # PREDICT_CONFIRM: "3"       # renders a prediction must survive (1 = off)
+      # PREDICT_CONFIRM_S: "90"    # seconds a prediction must persist (0 = off)
       # PREDICT_MISS_MAX_KM: "0"   # 0 = off; drop predictions missing by more
       # MAX_BOARD_FLIGHTS: "14"    # rows on the board
       # TURN_ENABLED: "1"          # off by default; enables turn/arc features
