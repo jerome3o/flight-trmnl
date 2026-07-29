@@ -31,6 +31,7 @@ Usage:
 
 import argparse
 import os
+import threading
 import json
 import math
 import re
@@ -216,11 +217,18 @@ def _rlog(msg):
         print(f"[routes] {msg}", file=sys.stderr, flush=True)
 
 
-def _get_json(url):
+# Per-request ceiling for a route lookup. ROUTE_BUDGET_S only decides whether
+# a NEW lookup may start, so without a tight per-request cap one begun just
+# under the deadline could still run for its full timeout and blow the budget.
+ROUTE_TIMEOUT_S = float(os.environ.get("ROUTE_TIMEOUT_S", "4"))
+ADSB_TIMEOUT_S = float(os.environ.get("ADSB_TIMEOUT_S", "10"))
+
+
+def _get_json(url, timeout=10):
     """GET -> parsed JSON; None on 404 (clean miss); raises on other errors."""
     req = urllib.request.Request(url, headers=UA)
     try:
-        with urllib.request.urlopen(req, timeout=10) as resp:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
             return json.loads(resp.read())
     except urllib.error.HTTPError as e:
         if e.code == 404:
@@ -228,11 +236,11 @@ def _get_json(url):
         raise
 
 
-def _post_json(url, payload):
+def _post_json(url, payload, timeout=10):
     req = urllib.request.Request(
         url, data=json.dumps(payload).encode(),
         headers={**UA, "Content-Type": "application/json"})
-    with urllib.request.urlopen(req, timeout=10) as resp:
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
         return json.loads(resp.read())
 
 
@@ -275,7 +283,7 @@ def _iata_flight_no(fr):
 
 
 def _p_adsbdb(cs, lat, lon):
-    data = _get_json(ADSBDB_URL.format(cs=cs))
+    data = _get_json(ADSBDB_URL.format(cs=cs), ROUTE_TIMEOUT_S)
     if data is None:
         return None                       # 404 = unknown callsign
     fr = data.get("response") if isinstance(data, dict) else None
@@ -293,7 +301,7 @@ def _hexdb_airport(icao):
         return AIRPORT_CACHE[icao]
     ap = None
     try:
-        data = _get_json(HEXDB_AIRPORT_URL.format(icao=icao))
+        data = _get_json(HEXDB_AIRPORT_URL.format(icao=icao), ROUTE_TIMEOUT_S)
         if isinstance(data, dict) and data.get("icao"):
             ap = _norm_airport(data, "hexdb")
     except Exception as e:
@@ -305,7 +313,7 @@ def _hexdb_airport(icao):
 
 
 def _p_hexdb(cs, lat, lon):
-    data = _get_json(HEXDB_ROUTE_URL.format(cs=cs))
+    data = _get_json(HEXDB_ROUTE_URL.format(cs=cs), ROUTE_TIMEOUT_S)
     if not isinstance(data, dict):
         return None
     codes = [c for c in (data.get("route") or "").split("-") if len(c) == 4]
@@ -321,7 +329,8 @@ def _p_hexdb(cs, lat, lon):
 
 def _p_adsblol(cs, lat, lon):
     data = _post_json(ROUTESET_URL,
-                      {"planes": [{"callsign": cs, "lat": lat, "lng": lon}]})
+                      {"planes": [{"callsign": cs, "lat": lat, "lng": lon}]},
+                      ROUTE_TIMEOUT_S)
     items = data if isinstance(data, list) else [data] if isinstance(data, dict) else []
     for item in items:
         if not isinstance(item, dict):
@@ -456,6 +465,12 @@ def enu_km(lat, lon, home_lat, home_lon):
 # and only under a monthly safety cap — past that we degrade gracefully to no
 # route. Leaving F24_KEY unset runs the whole board for free.
 F24_KEY = os.environ.get("F24_KEY")
+# FR24 is off by default. The code stays for when it is wanted again, but a
+# key sitting in the environment is no longer enough to spend credits — the
+# switch has to be thrown too.
+FR24_ENABLED = os.environ.get("FR24_ENABLED", "0").strip().lower() \
+    in ("1", "true", "yes", "on")
+FR24_ON = FR24_ENABLED and bool(F24_KEY)
 FR24_BASE = "https://fr24api.flightradar24.com"
 FR24_MONTHLY_CAP = int(os.environ.get("FR24_MONTHLY_CREDITS", "29000"))
 FR24_ROUTE_TTL = float(os.environ.get("FR24_ROUTE_TTL", "3600"))
@@ -472,7 +487,7 @@ DIAG = {"source": None, "n_scan": 0, "n_enriched": 0, "n_fr24": 0, "n_turn": 0,
         "turn": TURN_ENABLED,
         "fetched_at": None,
         "error": None, "credits_used": None, "credits_est": 0,
-        "credits_cap": FR24_MONTHLY_CAP, "credits_at": None, "fr24": bool(F24_KEY)}
+        "credits_cap": FR24_MONTHLY_CAP, "credits_at": None, "fr24": FR24_ON}
 
 
 def _fr24_get(path, params=""):
@@ -487,7 +502,7 @@ def _fr24_get(path, params=""):
 def fr24_usage():
     """Refresh real monthly credit usage for the debug panel (rate-limited)."""
     now = time.time()
-    if not F24_KEY:
+    if not FR24_ON:
         return
     if DIAG["credits_at"] and now - DIAG["credits_at"] < 300:
         return
@@ -510,7 +525,7 @@ def fr24_fetch_routes(callsigns):
     10 req/min limit; costs 8 credits per flight returned). Returns
     {callsign: route|None}."""
     out = {}
-    if not F24_KEY or not callsigns:
+    if not FR24_ON or not callsigns:
         return out
     cs = ",".join(callsigns[:15])
     try:
@@ -560,12 +575,12 @@ def fetch_aircraft(source, lat, lon, range_km):
         nm = min(range_km / 1.852, 250)
         url = UPSTREAMS[source].format(lat=round(lat, 5), lon=round(lon, 5), nm=round(nm, 1))
         req = urllib.request.Request(url, headers={"User-Agent": "window-flights/1.0"})
-        with urllib.request.urlopen(req, timeout=15) as resp:
+        with urllib.request.urlopen(req, timeout=ADSB_TIMEOUT_S) as resp:
             ac = json.loads(resp.read()).get("ac") or []
         recs = [_norm_adsb(a) for a in ac
                 if a.get("lat") is not None and a.get("lon") is not None
                 and a.get("alt_geom", a.get("alt_baro")) != "ground"]
-        DIAG.update(source="ADSB+DB+FR24" if F24_KEY else "ADSB+DB",
+        DIAG.update(source="ADSB+DB+FR24" if FR24_ON else "ADSB+DB",
                     n_scan=len(recs), fetched_at=time.time(), error=None)
         return recs
     except Exception as e:
@@ -603,7 +618,7 @@ def enrich_routes(flights):
         n_free += 1
 
     n_fr24 = 0
-    if unresolved and F24_KEY and _fr24_budget_ok():
+    if unresolved and FR24_ON and _fr24_budget_ok():
         now = time.time()
         need = [f["callsign"] for f in unresolved
                 if not (_fr24_routes.get(f["callsign"])
@@ -729,11 +744,16 @@ PREDICT_MISS_MAX_KM = float(os.environ.get("PREDICT_MISS_MAX_KM", "0") or 0) or 
 # could flash a flight onto the board and drop it again. Require this many
 # consecutive renders predicting the same aircraft before it earns a row. Set
 # to 1 to disable. Aircraft actually in view are never held back.
-PREDICT_CONFIRM = max(1, int(os.environ.get("PREDICT_CONFIRM", "3")))
-# How far apart renders are, so the gate can reason in wall-clock rather
-# than in renders. Mirrors render_loop.py's RENDER_INTERVAL.
-RENDER_INTERVAL_HINT = float(os.environ.get("RENDER_INTERVAL", "30"))
-_predict_streak = {}   # hex -> consecutive renders this aircraft was predicted
+# Measured in SECONDS, not in passes. A count of consecutive scans silently
+# changes meaning whenever the scan cadence does — moving the scan from 30 s to
+# 10 s would have cut a 3-scan filter from 90 s of evidence to 30 s without
+# anything in the config appearing to change. Time is what was ever meant.
+# The old PREDICT_CONFIRM is still honoured, read as a count of 30 s renders.
+_legacy_confirm = os.environ.get("PREDICT_CONFIRM")
+PREDICT_CONFIRM_S = float(os.environ.get(
+    "PREDICT_CONFIRM_S",
+    str(float(_legacy_confirm) * 30.0) if _legacy_confirm else "90"))
+_predict_first = {}    # hex -> when this prediction was first seen (0 = confirmed)
 
 
 # ---- turning traffic -------------------------------------------------------
@@ -960,46 +980,45 @@ def _entry_prediction(cfg, lat, lon, alt_ft, gs_kt, track_deg, vs_fpm, half,
     return None, miss, None
 
 
-def _confirmations_for(f):
-    """How many consecutive renders this prediction must survive.
+def _confirm_seconds_for(f):
+    """How long this prediction must persist before it earns a row.
 
-    The full count is right for a flight predicted minutes out — that is where
+    The full window is right for a flight predicted minutes out — that is where
     a straight-line projection is least trustworthy and most worth filtering.
-    It is arithmetically impossible for a brief pass: a crossing that starts in
-    40 s and lasts 18 s is over long before three renders 30 s apart can agree
-    on it. So when the whole event fits inside the confirmation window, ask for
-    one sighting instead and let it through."""
-    if PREDICT_CONFIRM <= 1:
-        return 1
+    It is arithmetically impossible for a brief pass: a crossing starting in
+    40 s and lasting 18 s is over long before a 90 s window elapses. So when
+    the whole event fits inside the window, let it through on first sight."""
+    if PREDICT_CONFIRM_S <= 0:
+        return 0.0
     eta, dwell = f.get("_eta_s"), f.get("_dwell_s")
     if eta is None:
-        return PREDICT_CONFIRM
-    window = PREDICT_CONFIRM * RENDER_INTERVAL_HINT
-    if eta + (dwell or 0.0) <= window:
-        return 1
-    return PREDICT_CONFIRM
+        return PREDICT_CONFIRM_S
+    if eta + (dwell or 0.0) <= PREDICT_CONFIRM_S:
+        return 0.0
+    return PREDICT_CONFIRM_S
 
 
 def _apply_confirmation(candidates):
-    """Hold a predicted flight back until it has been predicted on
-    PREDICT_CONFIRM consecutive renders, so one noisy projection never reaches
-    the board on its own. Aircraft already in view bypass this entirely — a
-    real sighting should never be delayed. Returns (kept, n_held)."""
-    kept, seen = [], set()
+    """Hold a predicted flight back until it has persisted for
+    PREDICT_CONFIRM_S, so one noisy projection never reaches the board on its
+    own. Aircraft already in view bypass this entirely — a real sighting should
+    never be delayed. Returns (kept, n_held)."""
+    now, kept, seen = time.time(), [], set()
     for f in candidates:
         key = f.get("hex") or f.get("callsign")
         seen.add(key)
         if f["in_view"]:
-            _predict_streak[key] = PREDICT_CONFIRM    # real now; don't hold it
+            _predict_first[key] = 0.0     # real now; never hold this one again
             kept.append(f)
             continue
-        streak = _predict_streak.get(key, 0) + 1
-        _predict_streak[key] = streak
-        if streak >= _confirmations_for(f):
+        first = _predict_first.get(key)
+        if first is None:
+            first = _predict_first[key] = now
+        if first == 0.0 or now - first >= _confirm_seconds_for(f):
             kept.append(f)
-    for key in list(_predict_streak):     # any gap in the scan breaks the streak
+    for key in list(_predict_first):   # any gap in the scan restarts the clock
         if key not in seen:
-            del _predict_streak[key]
+            del _predict_first[key]
     return kept, len(candidates) - len(kept)
 
 
@@ -1153,6 +1172,49 @@ def board_data(cfg):
         "flights": out,
     }
 
+
+
+# ------------------------------------------------------- background refresh
+# board_data does real network work — an ADS-B scan plus route lookups — and
+# used to run inside the render, so a slow upstream stretched a 30 s render
+# cycle past a minute. It now runs on its own clock in a background thread and
+# the renderer reads whatever the last good scan produced, so a render costs a
+# screenshot and nothing else.
+#
+# Decoupled, the scan can also run far more often than the board is drawn:
+# every refresh is a fresh look at the sky, and the render simply picks up the
+# most recent one.
+BOARD_REFRESH_S = float(os.environ.get("BOARD_REFRESH_S", "10"))
+_snapshot = None            # last good board_data payload
+_snapshot_lock = threading.Lock()   # serialises the shared caches board_data mutates
+
+
+def refresh_snapshot():
+    """Rebuild the board payload. Held under a lock because board_data mutates
+    module-level state (route caches, the confirmation streaks, DIAG) that the
+    request handlers also read."""
+    global _snapshot
+    with _snapshot_lock:
+        _snapshot = board_data(dict(DEFAULTS))
+    return _snapshot
+
+
+def _refresh_loop():
+    while True:
+        t0 = time.time()
+        try:
+            refresh_snapshot()
+        except Exception as e:
+            print(f"[board] refresh failed: {type(e).__name__}: {e}",
+                  file=sys.stderr, flush=True)
+        # pace against the start of the scan, so a slow one does not push the
+        # cadence out; a scan longer than the interval simply runs back to back
+        time.sleep(max(1.0, BOARD_REFRESH_S - (time.time() - t0)))
+
+
+def start_refresher():
+    threading.Thread(target=_refresh_loop, name="board-refresh",
+                     daemon=True).start()
 
 
 # ---------------------------------------------------------------- byos
@@ -1348,10 +1410,14 @@ class Handler(SimpleHTTPRequestHandler):
         # so this is local-only (like the default /api/visible).
         if not self._is_local():
             return self._json(403, {"error": "board data is local-only"})
-        try:
-            data = board_data(dict(DEFAULTS))
-        except Exception as e:
-            return self._json(502, {"error": f"upstream {DEFAULTS['source']} failed: {e}"})
+        data = _snapshot
+        if data is None:
+            # Cold start: nothing scanned yet, so do one inline rather than
+            # hand the renderer an empty sky.
+            try:
+                data = refresh_snapshot()
+            except Exception as e:
+                return self._json(502, {"error": f"upstream {DEFAULTS['source']} failed: {e}"})
         return self._json(200, data)
 
     def handle_api(self, parsed):
@@ -1375,7 +1441,8 @@ class Handler(SimpleHTTPRequestHandler):
         cfg["range_km"] = min(max(cfg["range_km"], 1), 463)  # ≤250 nm
         all_traffic = q.get("all", ["0"])[0].lower() in ("1", "true", "yes")
         try:
-            aircraft = visible_aircraft(cfg, all_traffic=all_traffic)
+            with _snapshot_lock:
+                aircraft = visible_aircraft(cfg, all_traffic=all_traffic)
         except Exception as e:
             return self._json(502, {"error": f"upstream {cfg['source']} failed: {e}"})
         self._json(200, aircraft)
@@ -1437,4 +1504,6 @@ if __name__ == "__main__":
     a = ap.parse_args()
     print(f"Webapp : http://{a.host}:{a.port}/")
     print(f"API    : http://{a.host}:{a.port}/api/visible")
+    print(f"Board  : rescanning every {BOARD_REFRESH_S:.0f}s in the background")
+    start_refresher()
     HTTPServer((a.host, a.port), Handler).serve_forever()
