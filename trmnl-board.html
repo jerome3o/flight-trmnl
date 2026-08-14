@@ -162,7 +162,13 @@
     letter-spacing:.02em;color:var(--l);
     white-space:nowrap;overflow:hidden;
   }
-  .meta .nm{font-weight:600;text-transform:uppercase;color:var(--w);flex:0 0 auto}
+  /* The airline yields before the route does: with both ends of the journey on
+     this line, "AMSTERDAM → HEATHROW" is what earns the width, and a clipped
+     carrier name still reads. Shrink factor 6 vs 1 decides the order. */
+  .meta .nm{
+    font-weight:600;text-transform:uppercase;color:var(--w);
+    flex:0 6 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;
+  }
   /* aircraft type — no longer a column of flaps, but still worth knowing */
   .meta .ty{font-weight:600;color:var(--l);flex:0 0 auto;letter-spacing:.06em}
   /* banking onto an approach — inverted so it reads at a glance */
@@ -171,10 +177,19 @@
     font-weight:700;letter-spacing:.08em;padding:0 .35em;white-space:nowrap;
   }
   .meta .sub{
-    font-weight:400;opacity:.9;
+    font-weight:400;opacity:.9;flex:0 1 auto;
     overflow:hidden;text-overflow:ellipsis;
   }
+  /* the destination half of the route: the end that says whether it is coming
+     your way, so it holds its own weight against the origin */
+  .meta .dest{font-weight:600;color:var(--w)}
   .row.blank .meta{visibility:hidden}
+
+  /* ---- watch ring: near, filed for a local field, but not yet inbound ----
+     Dashed flaps say "this is a heads-up, not an arrival" without needing a
+     legend, and match the dashed marker the map draws for the same aircraft. */
+  .row.watch .tile{border-style:dashed}
+  .row.watch .meta{opacity:.92}
 
   /* ---- vertical-trend glyph (climb/descent) on the airline sub-line ---- */
   .trend{
@@ -295,9 +310,9 @@ function layout(){
    the Thames + landmarks sit south of the flat, matching the real backend. */
 const SAMPLE={
   config:{bearing:135.0, fov:145.0, range_km:5.0, predict_range_km:30.0,
-    map_range_km:20.0, horizon_min:4.0,
+    map_range_km:15.0, watch_km:10.0, watch_airports:["LHR","LCY"], horizon_min:4.0,
     battery:{voltage:3.98, percent:77, rssi:-61},
-    debug:{source:"ADSB+DB+FR24", n_scan:318, n_board:8, n_held:2, n_enriched:8, n_fr24:1, n_turn:3, turn:true,
+    debug:{source:"ADSB+DB", n_scan:318, n_board:8, n_held:2, n_watch:2, n_enriched:8, n_fr24:0, n_turn:3, turn:true,
       fetched_at:Date.now()/1000-4, error:null, fr24:true,
       credits_used:120, credits_est:48, credits_cap:29000},
     geo:{
@@ -342,9 +357,16 @@ const SAMPLE={
     {callsign:"UAE7T", flight_no:"EK7", airline:"EMIRATES", type:"B77W",
      in_view:false, eta_min:9.0, bearing_deg:110, dist_km:25.0, track_deg:298,
      alt_ft:28000, origin:{iata:"DXB",city:"Dubai",country:"AE"}, destination:{iata:"LHR",country:"GB"}},
-    {callsign:"LOT285", flight_no:"LO285", airline:"LOT POLISH", type:"B738",
-     in_view:false, eta_min:10.0, bearing_deg:60, dist_km:28.0, track_deg:200,
-     alt_ft:31000, origin:{iata:"WAW",city:"Warsaw",country:"PL"}, destination:{iata:"LHR",country:"GB"}},
+    // watch ring: close by, filed for a local field, but not on a track that
+    // leads into the cone — no ETA, dashed flaps, NEAR in the ETA column
+    {callsign:"BAW9AC", flight_no:"BA1476", airline:"BRITISH AIRWAYS", type:"A320",
+     in_view:false, watch:true, eta_min:null, bearing_deg:20, dist_km:6.4, track_deg:60,
+     alt_ft:4200, vs_fpm:-640, origin:{iata:"EDI",city:"Edinburgh",country:"GB"},
+     destination:{iata:"LHR",country:"GB"}},
+    {callsign:"CFE83M", flight_no:"BA8483", airline:"BA CITYFLYER", type:"E190",
+     in_view:false, watch:true, eta_min:null, bearing_deg:305, dist_km:8.8, track_deg:210,
+     alt_ft:3000, vs_fpm:-520, origin:{iata:"ZRH",city:"Zurich",country:"CH"},
+     destination:{iata:"LCY",country:"GB"}},
   ]
 };
 
@@ -360,19 +382,49 @@ function countryName(code){
   code=String(code).toUpperCase().slice(0,2);
   try{ return (_regions && _regions.of(code)) || code; }catch(e){ return code; }
 }
-/* "City, Country" for the origin, in full (falls back gracefully) */
-function originFull(f){
-  const o=(f&&f.origin)||{};
+/* "City, Country" for an airport, in full (falls back gracefully) */
+function placeFull(p){
+  const o=p||{};
   const city=o.city?String(o.city):"";
   const country=countryName(o.country);
   return city && country ? city+", "+country : (city||country||"");
+}
+const originFull=f=>placeFull(f&&f.origin);
+
+/* The nearby fields by their everyday names. The route databases return
+   "London" for all five, which is useless when the question is which one. */
+const LOCAL_NAMES={LHR:"Heathrow", LCY:"London City", LGW:"Gatwick",
+                   STN:"Stansted", LTN:"Luton",
+                   EGLL:"Heathrow", EGLC:"London City", EGKK:"Gatwick",
+                   EGSS:"Stansted", EGGW:"Luton"};
+/* Short form for one end of a route: the local field's own name where we know
+   it, else the city, else whatever code we have. */
+function placeShort(p){
+  if(!p) return "";
+  const code=String(p.iata||p.icao||"").toUpperCase();
+  if(LOCAL_NAMES[code]) return LOCAL_NAMES[code];
+  return (p.city?String(p.city):"")||code;
+}
+/* "Amsterdam → Heathrow" when both ends resolved. With only one end known
+   there is room for the fuller "City, Country" form, so use it. */
+function routeText(f){
+  const o=placeShort(f&&f.origin), d=placeShort(f&&f.destination);
+  if(o&&d) return [esc(o), `<span class="dest">${esc(d)}</span>`].join(" &#8594; ");
+  if(o) return esc(originFull(f));
+  if(d) return `<span class="dest">${esc(placeFull(f.destination))}</span>`;
+  return "";
 }
 /* The flight number (BA172) when FR24 enrichment supplied one, else the raw
    ADS-B callsign (BAW172) — same flight, the identifier you'd hear on the
    radio rather than the one on a boarding pass. */
 const flightNo=f=>String((f&&(f.flight_no||f.callsign))||"").toUpperCase();
-/* list ETA (split-flap): NOW / ~5M */
-const etaText=f=> (f.in_view || !f.eta_min || f.eta_min<=0) ? "NOW" : ("~"+Math.round(f.eta_min)+"M");
+/* list ETA (split-flap): NOW / NEAR / ~5M.
+   NEAR is the watch ring — inside WATCH_KM and filed for a local field, but
+   not on a track that leads into the cone, so there is no arrival time to
+   give. Four characters, which is exactly the ETA column's width. */
+const etaText=f=> f.watch ? "NEAR"
+  : (f.in_view || !f.eta_min || f.eta_min<=0) ? "NOW"
+  : ("~"+Math.round(f.eta_min)+"M");
 
 /* emergency transponder squawks (octal) → meaning */
 const EMERG={"7500":"HIJACK","7600":"RADIO FAIL","7700":"EMERGENCY"};
@@ -402,6 +454,7 @@ function renderDebug(cfg){
               `SCAN <b>${d.n_scan}</b>`,
               `BOARD <b>${d.n_board}</b>`,
               `HELD <b>${d.n_held||0}</b>`,
+              `WATCH <b>${d.n_watch||0}</b>`,
               `ENR <b>${d.n_enriched}</b>`,
               // "off" vs "0" matters: one means the feature is disabled, the other
               // means the feed carries no bank angle or rate of turn
@@ -454,7 +507,7 @@ function rowHtml(f){
     const ty=f.type?esc(String(f.type).toUpperCase()):"";
     const sub = emg
       ? `<span class="emerg-badge">! ${esc(f.squawk)} ${esc(emg)}</span>`
-      : esc(originFull(f));
+      : routeText(f);      // already escaped; carries its own markup
     // an aircraft banking onto a local approach is the most interesting thing
     // it can be doing, so it displaces the origin city while the turn lasts
     const turning = f.turning_for
@@ -468,7 +521,7 @@ function rowHtml(f){
   }
   const flaps = COLS.map(([label,n,dim,right],i)=>
     `<div class="grp">${tiles(vals[i],n,dim,right)}</div>`).join("");
-  return `<div class="row${emg?" emerg":""}${f?"":" blank"}">`+
+  return `<div class="row${emg?" emerg":""}${f&&f.watch?" watch":""}${f?"":" blank"}">`+
          meta+`<div class="flaps">${flaps}</div></div>`;
 }
 
@@ -505,14 +558,26 @@ function buildMap(cfg, flights){
 
   const bearing=cfg.bearing||0, fov=cfg.fov||120;
   const range=cfg.range_km||25;
-  const mapRange=cfg.map_range_km||20;
+  const mapRange=cfg.map_range_km||15;
+  const watchKm=cfg.watch_km||0;
   const geo=cfg.geo||{};
 
   // projection: VIEW-UP. The world is rotated by the viewing bearing so that
-  // bearing points up the screen, then home sits near the bottom-centre at a
-  // fixed zoom to map_range_km.
-  const pxPerKm=(H*0.80)/mapRange;
-  const homeX=W/2, homeY=H*0.86;
+  // bearing points up the screen, then home sits at a fixed zoom to
+  // map_range_km.
+  //
+  // Home used to sit at 86% down the panel, which spent almost the whole map
+  // on the wedge in front of you. But an aircraft can be close by and behind
+  // the beam — turning base, or on a path that only crosses the view later —
+  // and the watch ring exists precisely to show those. So home moves up to
+  // 58%, and the scale is tied to the same fraction: 0.58H of panel runs
+  // forward and covers exactly map_range_km, while the 0.42H behind covers
+  // ~10.9 km — enough to hold the whole 10 km watch circle with room for its
+  // label. Scale and position share the 0.58 so the two stay consistent if it
+  // is ever retuned.
+  const HOME_FRAC=0.58;
+  const pxPerKm=(H*HOME_FRAC)/mapRange;
+  const homeX=W/2, homeY=H*HOME_FRAC;
   const vb=bearing*D2R, cosB=Math.cos(vb), sinB=Math.sin(vb);
   // (e,n) km east/north of home → screen px, rotated so `bearing` is up
   const proj=(e,n)=>[homeX + (e*cosB - n*sinB)*pxPerKm,
@@ -560,6 +625,20 @@ function buildMap(cfg, flights){
     // labels ride up the ring ahead of home, just left of the centre line
     P.push(`<text x="${(homeX-fs*2.4).toFixed(1)}" y="${(homeY-rr+fs*0.85).toFixed(1)}" `+
            `text-anchor="end" font-family="Oswald,sans-serif" font-size="${(fs*0.62).toFixed(1)}" fill="${grey}">${km}km</text>`);
+  }
+  // ---- the watch ring, drawn heavier and dashed: inside this circle, a
+  // flight filed for a local field earns a row whether or not it is currently
+  // pointed at you. Labelled, because it is the one ring that means something
+  // beyond distance.
+  if(watchKm>0 && watchKm<=mapRange){
+    const wr=watchKm*pxPerKm;
+    P.push(`<circle cx="${homeX}" cy="${homeY}" r="${wr.toFixed(1)}" fill="none" stroke="${grey}" `+
+           `stroke-width="${(strokeW*1.6).toFixed(2)}" stroke-opacity="0.85" `+
+           `stroke-dasharray="${(fs*0.5).toFixed(1)} ${(fs*0.42).toFixed(1)}"/>`);
+    // rides just inside the ring behind home, where the cone never reaches
+    P.push(`<text x="${homeX.toFixed(1)}" y="${(homeY+wr-fs*0.55).toFixed(1)}" text-anchor="middle" `+
+           `font-family="Oswald,sans-serif" font-weight="600" letter-spacing="1.2" `+
+           `font-size="${(fs*0.58).toFixed(1)}" fill="${grey}">WATCH ${Math.round(watchKm)}KM</text>`);
   }
 
   // ---- River Thames polyline ----
@@ -636,8 +715,15 @@ function buildMap(cfg, flights){
                `stroke-width="${(strokeW*1.3).toFixed(2)}" stroke-linecap="round" `+
                `stroke-dasharray="${(fs*0.22).toFixed(1)} ${(fs*0.34).toFixed(1)}" stroke-opacity=".8"/>`);
       }
+      // three states, each readable at a glance in pure greyscale:
+      //   in view  — solid disc
+      //   inbound  — hollow ring (predicted to enter the cone)
+      //   watch    — dashed ring (near and locally bound, but not inbound)
       if(inv)
         P.push(`<circle cx="${ax.toFixed(1)}" cy="${ay.toFixed(1)}" r="${markR.toFixed(1)}" fill="${dark}" stroke="${paper}" stroke-width="${strokeW}"/>`);
+      else if(f.watch)
+        P.push(`<circle cx="${ax.toFixed(1)}" cy="${ay.toFixed(1)}" r="${(markR*0.92).toFixed(1)}" fill="${paper}" stroke="${grey}" `+
+               `stroke-width="${(strokeW*1.6).toFixed(2)}" stroke-dasharray="${(markR*0.55).toFixed(1)} ${(markR*0.45).toFixed(1)}"/>`);
       else
         P.push(`<circle cx="${ax.toFixed(1)}" cy="${ay.toFixed(1)}" r="${(markR*0.92).toFixed(1)}" fill="${paper}" stroke="${grey}" stroke-width="${(strokeW*1.6).toFixed(2)}"/>`);
       if(emergOf(f))
@@ -716,8 +802,11 @@ function buildMap(cfg, flights){
          `text-anchor="middle" font-family="Oswald,sans-serif" font-weight="600" `+
          `font-size="${(fs*0.82).toFixed(1)}" fill="${dark}">N</text>`);
 
-  // ---- heading label, top-centre: says what "up" means on this map ----
-  P.push(`<text x="${(W/2).toFixed(1)}" y="${(fs*1.1).toFixed(1)}" text-anchor="middle" `+
+  // ---- heading label: says what "up" means on this map. Top-RIGHT, not
+  // top-centre: home sits higher up the panel now, so the outer range rings
+  // reach the top edge and their km labels ride the centre line straight
+  // through where this used to sit.
+  P.push(`<text x="${(W-fs*0.8).toFixed(1)}" y="${(fs*1.1).toFixed(1)}" text-anchor="end" `+
          `font-family="Oswald,sans-serif" font-weight="600" letter-spacing="1.5" `+
          `font-size="${(fs*0.7).toFixed(1)}" fill="${grey}">`+
          `VIEW ${Math.round(bearing)}° ${cardinal(bearing)}</text>`);
@@ -744,10 +833,12 @@ function draw(data){
 
   // view cone + counts now ride in the header, so the board runs to the edge
   const nView=flights.filter(f=>f.in_view).length;
-  const nIn=flights.length-nView;
+  const nWatch=flights.filter(f=>f.watch).length;
+  const nIn=flights.length-nView-nWatch;
   document.getElementById("hdr-meta").textContent=
     `${Math.round(cfg.bearing)}° ${cardinal(cfg.bearing)} · ${Math.round(cfg.range_km)} KM`+
-    ` · IN VIEW ${nView} · ${nIn} INBOUND`;
+    ` · IN VIEW ${nView} · ${nIn} INBOUND`+
+    (nWatch?` · ${nWatch} NEAR`:"");
 
   const now=new Date();
   document.getElementById("clock").textContent=

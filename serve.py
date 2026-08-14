@@ -675,6 +675,7 @@ def _flight_record(ac, cfg, dist, brg, elev, in_view):
         "type_desc": TYPE_NAMES.get(ac.get("type")),
         "registration": ac.get("reg"),
         "in_view": in_view,
+        "watch": False,       # near, and filed for a field that brings it past
         "lat": ac["lat"], "lon": ac["lon"],
         "dist_km": round(dist, 2),
         "bearing_deg": round(brg, 1),
@@ -887,6 +888,58 @@ def validate_approach_turns(flights):
         f["turning_for"] = None
 
 
+# ---- the watch ring ---------------------------------------------------------
+# There is more than one approach path through the window's field of view, and
+# an aircraft can be close by while pointed somewhere the projection does not
+# lead into the cone — turning base, holding, or lined up on a path that only
+# crosses the view later. Those are exactly the ones worth knowing about, and
+# the prediction never proposes them, because right now they are not coming.
+#
+# So proximity gets its own class of row. Anything inside WATCH_KM that the
+# prediction passed over is carried as a "watch" entry: not an arrival, no ETA,
+# just "near, and going somewhere that brings it past you". The filed
+# destination is what qualifies it — an aircraft 8 km away descending for
+# Heathrow will be overhead soon enough; one at the same spot en route to
+# Amsterdam is only traffic. Unlike the approach badge, an unresolved route is
+# not enough here: the whole claim rests on the destination, so no destination
+# means no row.
+WATCH_KM = float(os.environ.get("WATCH_KM", "10"))
+WATCH_AIRPORTS = [a.strip().upper() for a in
+                  os.environ.get("WATCH_AIRPORTS", "LHR,LCY").split(",") if a.strip()]
+WATCH_MAX = int(os.environ.get("WATCH_MAX", "4"))       # rows on the board
+WATCH_CANDIDATES = WATCH_MAX * 2       # nearest N sent for route resolution
+
+
+def _is_watch_destination(f):
+    """True when the flight's filed destination is one of WATCH_AIRPORTS.
+    Matches on IATA, or on ICAO via LOCAL_AIRPORTS. Unknown route -> False."""
+    dest = f.get("destination") or {}
+    iata = (dest.get("iata") or "").strip().upper()
+    icao = (dest.get("icao") or "").strip().upper()
+    if not iata and not icao:
+        return False
+    for code in WATCH_AIRPORTS:
+        if iata == code:
+            return True
+        want = LOCAL_AIRPORTS.get(code, (None, None, None))[2]
+        if icao and want and icao == want:
+            return True
+    return False
+
+
+def filter_watch(watchers):
+    """Keep the watch entries actually landing at a watched field, nearest
+    first, capped at WATCH_MAX. Geometry proposes, the route disposes — the
+    same division of labour as validate_approach_turns."""
+    kept = [f for f in watchers if _is_watch_destination(f)]
+    for f in watchers:
+        if f not in kept:
+            _rlog(f"{f.get('callsign')}: {f['dist_km']}km away but not filed for "
+                  f"{'/'.join(WATCH_AIRPORTS)} — not watched")
+    kept.sort(key=lambda f: f["dist_km"])
+    return kept[:WATCH_MAX]
+
+
 def _cpa(e0, n0, ve, vn, radius_km):
     """Closest approach of a straight track to the circle of radius radius_km
     centred on home, worked in the flat east/north frame.
@@ -1002,7 +1055,9 @@ def _apply_confirmation(candidates):
     """Hold a predicted flight back until it has persisted for
     PREDICT_CONFIRM_S, so one noisy projection never reaches the board on its
     own. Aircraft already in view bypass this entirely — a real sighting should
-    never be delayed. Returns (kept, n_held)."""
+    never be delayed. So do watch entries: their claim is a measured distance
+    plus a filed route, with no projection in it to be noisy. Returns
+    (kept, n_held)."""
     now, kept, seen = time.time(), [], set()
     for f in candidates:
         key = f.get("hex") or f.get("callsign")
@@ -1010,6 +1065,10 @@ def _apply_confirmation(candidates):
         if f["in_view"]:
             _predict_first[key] = 0.0     # real now; never hold this one again
             kept.append(f)
+            continue
+        if f.get("watch"):
+            _predict_first.setdefault(key, now)   # keep its prediction clock
+            kept.append(f)                        # running for when it turns in
             continue
         first = _predict_first.get(key)
         if first is None:
@@ -1025,7 +1084,7 @@ def _apply_confirmation(candidates):
 # How much of the surroundings the map shows (radius in km from home). Much
 # tighter than the prediction range so the Thames + local landmarks read; far
 # inbound traffic is clamped to the map edge by the board.
-MAP_RANGE_KM = float(os.environ.get("MAP_RANGE_KM", "20"))
+MAP_RANGE_KM = float(os.environ.get("MAP_RANGE_KM", "15"))
 
 # River Thames through central/east London, west→east, simplified (lat, lon).
 # Plotted relative to home so the map shows the real course past the window.
@@ -1123,10 +1182,15 @@ def board_data(cfg):
             if eta_s is not None and PREDICT_MISS_MAX_KM is not None \
                     and miss is not None and miss > PREDICT_MISS_MAX_KM:
                 continue
-        if eta_s is None:
+        # Not coming into view, but close enough that where it is filed for
+        # decides whether it matters. The route is not known yet, so this is
+        # only a candidacy — filter_watch settles it once routes resolve.
+        watch = eta_s is None and WATCH_KM > 0 and dist <= WATCH_KM
+        if eta_s is None and not watch:
             continue
         rec = _flight_record(ac, cfg, dist, brg, elev, in_view)
-        rec["eta_min"] = round(eta_s / 60.0, 1)
+        rec["watch"] = watch
+        rec["eta_min"] = round(eta_s / 60.0, 1) if eta_s is not None else None
         rec["miss_km"] = round(miss, 2) if miss is not None else None
         rec["turn_dps"] = round(omega, 2) if omega is not None else None
         rec["turning_for"] = approach_turn(lat, lon, alt_ft, track, omega, vs)
@@ -1136,9 +1200,19 @@ def board_data(cfg):
     for f in out:
         f.pop("_eta_s", None); f.pop("_dwell_s", None)
     DIAG["n_turn"] = n_turn
-    # in-view first, then soonest arrivals; keep the board readable
-    out.sort(key=lambda f: (not f["in_view"], f["eta_min"], f["dist_km"]))
-    out = out[:MAX_BOARD_FLIGHTS]
+    # in-view first, then soonest arrivals, then the watch ring last
+    watchers = [f for f in out if f["watch"]]
+    arrivals = [f for f in out if not f["watch"]]
+    arrivals.sort(key=lambda f: (not f["in_view"], f["eta_min"], f["dist_km"]))
+    watchers.sort(key=lambda f: f["dist_km"])
+    watchers = watchers[:WATCH_CANDIDATES]
+    # Watch rows live or die by their filed route, so resolve those first —
+    # enrich_routes is capped, and a starved watch entry would be dropped for
+    # having no destination rather than the wrong one. ROUTE_CACHE makes the
+    # second pass free for anything the first already looked up.
+    enrich_routes(watchers)
+    watchers = filter_watch(watchers)
+    out = (arrivals + watchers)[:MAX_BOARD_FLIGHTS]
     enrich_routes(out)          # routes for just these (in-view first)
     validate_approach_turns(out)   # the filed destination vetoes the geometry
     fr24_usage()                # refresh credit counter for the debug panel
@@ -1149,6 +1223,8 @@ def board_data(cfg):
             "range_km": cfg["range_km"],
             "predict_range_km": PREDICT_RANGE_KM,
             "map_range_km": MAP_RANGE_KM,
+            "watch_km": WATCH_KM,
+            "watch_airports": WATCH_AIRPORTS,
             "horizon_min": PREDICT_HORIZON_S / 60.0,
             "geo": build_geo(cfg["lat"], cfg["lon"]),
             "battery": dict(LAST_DEVICE),
@@ -1157,6 +1233,7 @@ def board_data(cfg):
                 "n_scan": DIAG["n_scan"],
                 "n_board": len(out),
                 "n_held": n_held,
+                "n_watch": sum(1 for f in out if f["watch"]),
                 "n_enriched": DIAG["n_enriched"],
                 "n_fr24": DIAG["n_fr24"],
                 "n_turn": DIAG["n_turn"],
