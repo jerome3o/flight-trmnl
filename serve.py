@@ -1395,15 +1395,33 @@ def byos_display(base_url):
     }
 
 
-def byos_reset(message):
-    """Sent when the Access-Token is missing/invalid: tells a desynced device
-    to re-pair, and hands an attacker no image_url."""
+def byos_reset(message, repair=False):
+    """Sent when the Access-Token is missing/invalid. Hands an attacker no
+    image_url either way; what differs is whether the device is offered a way
+    back.
+
+    repair=True is the desync case: a device we recognise whose token no
+    longer matches, which is what happens when DEVICE_SALT changes underneath
+    it. reset_firmware tells it to discard its stored credentials and re-run
+    /api/setup, where it is issued a key from the current salt. Without that
+    flag the device is stuck for good — the api_key it holds can never become
+    valid again, and it has no other way to ask for a new one.
+
+    special_function follows the same split. "sleep" is persistent: the
+    firmware keeps it across reboots and only runs the image path while the
+    value is SF_NONE, so parking a device there is a decision that outlives
+    the fault that caused it. A device being asked to re-pair must come back
+    to SF_NONE or it would re-pair into a display loop it never runs.
+
+    repair=False is the allowlist case — a device excluded on purpose. That
+    one is parked and left parked: resetting it would only loop it through a
+    setup that refuses it."""
     return {
         "status": 500,
-        "reset_firmware": False,
+        "reset_firmware": bool(repair),
         "image_url": None,
         "refresh_rate": 60,
-        "special_function": "sleep",
+        "special_function": "none" if repair else "sleep",
         "error": message,
     }
 
@@ -1448,9 +1466,15 @@ class Handler(SimpleHTTPRequestHandler):
             token = self.headers.get("Access-Token") or self.headers.get("access-token")
             batt = self.headers.get("BATTERY_VOLTAGE") or self.headers.get("Battery-Voltage")
             rssi = self.headers.get("RSSI") or self.headers.get("Rssi")
-            if not _mac_allowed(mac) or not hmac.compare_digest(token or "", _device_key(mac)):
-                print(f"[byos] display DENIED for {mac} (unlisted or bad token)", flush=True)
-                return self._json(200, byos_reset("unrecognised device"))
+            allowed = _mac_allowed(mac)
+            if not allowed or not hmac.compare_digest(token or "", _device_key(mac)):
+                # An allowed device with a bad token has desynced rather than
+                # done anything wrong — offer it a re-pair. An unlisted one is
+                # refused without one. The log says which, because the two
+                # need different things from you.
+                why = "unlisted device" if not allowed else "stale token — asking it to re-pair"
+                print(f"[byos] display DENIED for {mac} ({why})", flush=True)
+                return self._json(200, byos_reset(why, repair=allowed))
             record_device_state(batt, rssi)
             print(f"[byos] display poll from {mac} batt={batt} rssi={rssi}", flush=True)
             return self._json(200, byos_display(self._public_base()))
